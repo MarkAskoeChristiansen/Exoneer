@@ -1,0 +1,28 @@
+# =========================================================
+# Exoneer .gitignore — UE5 project
+# =========================================================
+# Build artifacts
+Binaries/
+DerivedDataCache/
+Intermediate/
+Saved/
+Build/
+
+# Visual Studio / Rider / VS Code
+.vs/
+.vscode/
+.idea/
+*.sln
+*.suo
+*.xcodeproj/
+*.xcworkspace/
+*.VC.db
+*.opensdf
+*.sdf
+*.opendb
+*.unsuccessfulbuild
+*.user
+
+# OS junk
+.DS_Store
+Thumbs.db

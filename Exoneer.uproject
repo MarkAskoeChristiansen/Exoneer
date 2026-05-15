@@ -1,0 +1,28 @@
+{
+	"FileVersion": 3,
+	"EngineAssociation": "5.4",
+	"Category": "Game",
+	"Description": "Exoneer — first-person stylized survival space engineering sandbox prototype.",
+	"Modules": [
+		{
+			"Name": "Exoneer",
+			"Type": "Runtime",
+			"LoadingPhase": "Default",
+			"AdditionalDependencies": [
+				"Engine",
+				"CoreUObject",
+				"EnhancedInput",
+				"UMG",
+				"CommonUI",
+				"PhysicsCore",
+				"ChaosVehicles"
+			]
+		}
+	],
+	"Plugins": [
+		{ "Name": "EnhancedInput", "Enabled": true },
+		{ "Name": "CommonUI", "Enabled": true },
+		{ "Name": "ModelingToolsEditorMode", "Enabled": true },
+		{ "Name": "ChaosVehiclesPlugin", "Enabled": true }
+	]
+}

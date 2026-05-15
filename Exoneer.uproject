@@ -1,6 +1,6 @@
 {
 	"FileVersion": 3,
-	"EngineAssociation": "5.4",
+	"EngineAssociation": "5.7",
 	"Category": "Game",
 	"Description": "Exoneer — first-person stylized survival space engineering sandbox prototype.",
 	"Modules": [

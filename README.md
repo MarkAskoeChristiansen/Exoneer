@@ -1,6 +1,6 @@
 # Exoneer
 
-**Exoneer** is the start of a first-person, stylized, survival space-engineering sandbox built for **Unreal Engine 5.4+**. The player is a stranded engineer on an alien planet who survives by mining, refining, fabricating, building modular bases, and eventually constructing vehicles and ships. The visual target is *chunky, colorful, cartoonish sci-fi* with clean silhouettes and rounded edges — never childish, never derivative of any existing IP.
+**Exoneer** is the start of a first-person, stylized, survival space-engineering sandbox built for **Unreal Engine 5.7+**. The player is a stranded engineer on an alien planet who survives by mining, refining, fabricating, building modular bases, and eventually constructing vehicles and ships. The visual target is *chunky, colorful, cartoonish sci-fi* with clean silhouettes and rounded edges — never childish, never derivative of any existing IP.
 
 > ⚠️ **Project status.** This repository contains the **C++ foundation, configuration, and project scaffold**. UE5 binary content (Blueprints, maps, UMG widgets, Data Asset instances, meshes, materials) **must be authored inside the UE5 Editor** — it cannot be checked in as text. The first time you open this project in UE5, you'll author the Blueprints/Data Assets/Map listed in [Editor Setup](#editor-setup) below; the C++ systems are already in place and ready to be wired up.
 
@@ -126,7 +126,7 @@ Two key actors form the spine of construction:
 ## How to Open & Build
 
 **Requirements**
-- Unreal Engine **5.4** or newer
+- Unreal Engine **5.7** or newer
 - Visual Studio 2022 (Windows) or Xcode (Mac) with C++ workload
 - The `EnhancedInput`, `CommonUI`, and `ChaosVehiclesPlugin` engine plugins (already declared in `Exoneer.uproject`)
 
@@ -268,7 +268,7 @@ Bind UI buttons to `GetGameInstance()->GetSubsystem<USaveGameSubsystem>()->SaveT
 
 ### ✅ Milestone 0 — Scaffold (this repo)
 - All systems described above exist as compilable C++.
-- Project compiles against UE 5.4 with Enhanced Input + CommonUI + ChaosVehicles.
+- Project compiles against UE 5.7 with Enhanced Input + CommonUI + ChaosVehicles.
 
 ### 🎯 Milestone 1 — First Survival Loop
 After [Editor Setup](#editor-setup): walk a planet surface, mine resources, manage oxygen / suit power, open inventory, craft basic components, place modular blocks, and build a powered base with solar panel, battery, oxygen generator, refinery, fabricator, cargo container.

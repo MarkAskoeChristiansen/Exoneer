@@ -14,7 +14,8 @@
 5. [Editor Setup — bringing the prototype to life](#editor-setup)
 6. [Controls](#controls)
 7. [Milestones & Roadmap](#milestones--roadmap)
-8. [Extending Exoneer](#extending-exoneer)
+8. [Next Production Prompts](#next-production-prompts)
+9. [Extending Exoneer](#extending-exoneer)
 
 ---
 
@@ -285,6 +286,28 @@ Build and pilot a small modular hover-rover or atmospheric craft using cockpit +
 - True spherical planet (swap `APlanetEnvironmentManager` for a surface-walking + gravity-direction-rotation system; everything else is already grid-relative).
 - Pressurized rooms (add a `UPressureZoneComponent` that walks `ConnectionPoints` of placed blocks).
 - Modular ship combat, multiplayer, and persistent universe.
+
+---
+
+## Next Production Prompts
+
+Use these prompts in order to turn the scaffold into a complete, beautiful UE5.7+ game while keeping every step shippable:
+
+1. **Vertical slice polish:** Build the starter planet map with stylized lighting, readable resource silhouettes, a crash-pod landmark, tuned movement, and a first 10-minute survival loop.
+2. **Art bible and style kit:** Define Exoneer's original shape language, color palette, material rules, UI typography, icon style, VFX language, and audio mood for all future assets.
+3. **Core UI pass:** Implement HUD, inventory, build menu, machine panels, power/oxygen readouts, pause/settings, controller navigation, and accessibility-friendly scaling.
+4. **Onboarding and tutorial flow:** Add an in-world quest tracker that teaches oxygen, mining, refining, fabrication, power, base building, and vehicle piloting without modal walls of text.
+5. **Resource ecology:** Add biome-specific resource distributions, deposit variants, scanning feedback, hand-mining upgrades, and meaningful reasons to explore beyond the crash site.
+6. **Base building expansion:** Add foundations, walls, doors, windows, ramps, lights, cargo, decorative pieces, snapping previews, placement sounds, repair, dismantle refunds, and build categories.
+7. **Power and oxygen depth:** Add generators, batteries, cables/conduits, overload warnings, oxygen tanks, room pressurization rules, leaks, and clear diagnostic UI.
+8. **Crafting progression:** Balance recipes, introduce tiered machines, research unlocks, component quality, queue management, and satisfying fabrication animations.
+9. **Hazards and survival drama:** Add storms, temperature events, radiation pockets, meteor showers, suit damage, shelter value, emergency alarms, and fair recovery options.
+10. **Vehicle milestone:** Ship a modular rover/hovercraft loop with cockpit UI, thruster placement rules, mass handling, battery drain, cargo attachment, repair, and terrain traversal goals.
+11. **World beauty pass:** Replace placeholders with original stylized meshes, terrain materials, sky gradients, clouds, wind motion, particles, decals, ambient audio, and strong composition landmarks.
+12. **Save/load completion:** Finish block respawn via AssetManager lookup, add save slots, autosave, versioned save migration, thumbnails, and robust failure messages.
+13. **Progression and goals:** Add milestone objectives from crash survival to launch-pad construction, with rewards that unlock new blocks, tools, biomes, and vehicle capabilities.
+14. **Performance and UX hardening:** Profile large bases, optimize ticking systems, pool VFX/audio, validate input rebinding, add localization-ready text, and test keyboard/mouse plus gamepad.
+15. **Release-quality demo:** Create a trailer-ready demo path, title screen, credits, settings presets, bug-report hooks, balance pass, QA checklist, and packaging settings for a public UE5.7 build.
 
 ---
 

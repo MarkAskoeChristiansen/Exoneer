@@ -1,6 +1,6 @@
 {
 	"FileVersion": 3,
-	"EngineAssociation": "{6AD99FF4-4B57-6C37-BCCB-D9A1E3590894}",
+	"EngineAssociation": "5.8",
 	"Category": "Game",
 	"Description": "Exoneer - first-person stylized survival space engineering sandbox prototype.",
 	"Modules": [
@@ -37,6 +37,10 @@
 		},
 		{
 			"Name": "EditorScriptingUtilities",
+			"Enabled": true
+		},
+		{
+			"Name": "ModelContextProtocol",
 			"Enabled": true
 		}
 	]

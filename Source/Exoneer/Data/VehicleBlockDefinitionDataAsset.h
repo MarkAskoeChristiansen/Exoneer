@@ -62,6 +62,14 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Module")
 	float MaxThrust = 0.f;
 
+	/**
+	 * Rated reaction torque per axis (N*m) for attitude gyro blocks. The
+	 * construct sums this over Complete gyros; a vehicle with none has no
+	 * attitude authority at all, which is the physical truth.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Module")
+	float MaxGyroTorqueNm = 0.f;
+
 	/** True for wheel blocks: excluded from ISMC visuals, gets a UWheelModule + a dedicated animated mesh component. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Wheel")
 	bool bIsWheel = false;

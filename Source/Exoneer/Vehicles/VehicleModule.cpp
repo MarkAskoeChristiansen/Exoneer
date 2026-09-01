@@ -5,6 +5,7 @@
 #include "Interfaces/Damageable.h"
 #include "Interfaces/Pilotable.h"
 #include "Vehicles/ExoneerVehicleUnits.h"
+#include "Vehicles/VehicleWheelState.h"
 #include "Components/StaticMeshComponent.h"
 #include "GameFramework/Pawn.h"
 
@@ -103,6 +104,93 @@ void UCockpitModule::TickModule(float DeltaSeconds)
 	{
 		IPilotable::Execute_ExitPilot(Owner, Pilot);
 	}
+}
+
+// --- Attitude gyro (reaction wheel triad) ---
+
+void UGyroModule::Initialize(AVehicleConstruct* InConstruct, int32 InBlockInstanceId)
+{
+	Super::Initialize(InConstruct, InBlockInstanceId);
+	if (const UVehicleBlockDefinitionDataAsset* Def = FindDef())
+	{
+		RatedTorqueNm = FMath::Max(0.f, Def->MaxGyroTorqueNm);
+	}
+}
+
+void UGyroModule::TickModule(float DeltaSeconds)
+{
+	AVehicleConstruct* Owner = GetConstruct();
+	if (!Owner || !Owner->PhysicsRoot || !Owner->PhysicsRoot->IsSimulatingPhysics()
+		|| RatedTorqueNm <= 0.f || DeltaSeconds <= 0.f)
+	{
+		LastCommandFraction = 0.f;
+		return;
+	}
+
+	const FQuat BodyQuat = Owner->GetActorQuat();
+	const FVector AngularVelocity = Owner->PhysicsRoot->GetPhysicsAngularVelocityInRadians();
+	const float MomentumLimit = RatedTorqueNm * SaturationSeconds;
+
+	// Commanded torque, capped at the rating.
+	FVector CommandTorqueWorld = CommandWorld.GetClampedToMaxSize(1.f) * RatedTorqueNm;
+
+	// Saturation: a rotor already at its speed limit cannot absorb more
+	// momentum in that direction, so cancel the component of the command
+	// that would wind it further. The opposite direction still works, which
+	// is what lets a saturated gyro recover as soon as you steer back.
+	const FVector MomentumWorld = BodyQuat.RotateVector(StoredMomentumLocal);
+	if (!MomentumWorld.IsNearlyZero() && MomentumWorld.Size() >= MomentumLimit)
+	{
+		const FVector SaturatedDir = MomentumWorld.GetSafeNormal();
+		// The rotor winds up opposite the torque it delivers to the hull.
+		const float WindingComponent = -FVector::DotProduct(CommandTorqueWorld, SaturatedDir);
+		if (WindingComponent > 0.f)
+		{
+			CommandTorqueWorld += SaturatedDir * WindingComponent;
+		}
+	}
+
+	LastCommandFraction = FMath::Clamp(CommandTorqueWorld.Size() / RatedTorqueNm, 0.f, 1.f);
+
+	// Brownouts weaken attitude control physically - the motors are simply
+	// given less current.
+	CommandTorqueWorld *= FMath::Clamp(Owner->PowerSupplyFraction, 0.f, 1.f);
+
+	// Gyroscopic reaction: -w x h. A wound rotor resists rotation about the
+	// other axes; this is the term that makes a spun-up gyro feel like one.
+	const FVector CrossTerm = FVector::CrossProduct(AngularVelocity, MomentumWorld);
+	const FVector TorqueOnHull = CommandTorqueWorld - CrossTerm;
+
+	if (!TorqueOnHull.IsNearlyZero())
+	{
+		Owner->PhysicsRoot->AddTorqueInRadians(TorqueOnHull * ExoneerUnits::NmToUETorque);
+	}
+
+	// Integrate rotor momentum: what the hull gains, the rotors lose.
+	StoredMomentumLocal -= BodyQuat.UnrotateVector(CommandTorqueWorld) * DeltaSeconds;
+
+	// Momentum dumping. A reaction wheel can only shed stored momentum
+	// against an EXTERNAL torque; on the ground the wheels supply exactly
+	// that through ground friction, so the rotors bleed down while any wheel
+	// is in contact. Airborne, the momentum stays - saturate in flight and
+	// you must land to reset, which is the honest constraint.
+	const FVehicleDrivetrainSummary Drivetrain = Owner->GetDrivetrainSummary();
+	if (Drivetrain.WheelsInContact > 0)
+	{
+		const float BleedPerSecond = 0.25f;   // ~4 s time constant
+		StoredMomentumLocal *= FMath::Max(0.f, 1.f - BleedPerSecond * DeltaSeconds);
+	}
+	StoredMomentumLocal = StoredMomentumLocal.GetClampedToMaxSize(MomentumLimit);
+}
+
+float UGyroModule::GetCurrentDraw() const
+{
+	// Draw follows commanded torque (motor current is proportional to
+	// torque), plus a small always-on electronics/bearing load. A parked gyro
+	// must not burn its full rating forever.
+	const UVehicleBlockDefinitionDataAsset* Def = FindDef();
+	const float Rated = Def ? FMath::Max(0.f, -Def->PowerDelta) : 0.f;
+	return Rated * (0.05f + 0.95f * LastCommandFraction);
 }
 
 // --- Solar collector ---

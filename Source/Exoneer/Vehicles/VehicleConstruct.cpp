@@ -1410,9 +1410,31 @@ void AVehicleConstruct::ServerRouteThrust(float DeltaSeconds)
 		}
 	}
 
-	// Throttle each thruster by how well its thrust direction serves the intent.
+	// Attitude command for the gyro blocks. Rotate intent is (pitch, yaw,
+	// roll): pitch turns about the cockpit RIGHT axis, yaw about UP, roll
+	// about FORWARD - not a raw vector rotation of the intent. There is no
+	// mass scaling and no mode fraction any more: authority is exactly what
+	// the installed gyros are rated for, and Ground mode simply never fills
+	// Rotate (the mouse is a camera there).
+	FVector GyroCommandWorld = FVector::ZeroVector;
+	if (PilotPawn && Cockpit && !PilotInput.Rotate.IsNearlyZero())
+	{
+		const FVector Rotate = PilotInput.Rotate.GetClampedToMaxSize(1.f);
+		GyroCommandWorld = (CockpitQuat.GetAxisY() * Rotate.X
+			+ CockpitQuat.GetAxisZ() * Rotate.Y
+			+ CockpitQuat.GetAxisX() * Rotate.Z).GetClampedToMaxSize(1.f);
+	}
+
+	// Throttle each thruster by how well its thrust direction serves the
+	// intent, and hand every gyro the attitude command (unconditionally, so a
+	// released stick actually zeroes it instead of torquing forever).
 	for (const TPair<int32, TObjectPtr<UVehicleModule>>& Pair : Modules)
 	{
+		if (UGyroModule* Gyro = Cast<UGyroModule>(Pair.Value.Get()))
+		{
+			Gyro->CommandWorld = GyroCommandWorld;
+			continue;
+		}
 		UThrusterModule* Thruster = Cast<UThrusterModule>(Pair.Value.Get());
 		if (!Thruster)
 		{
@@ -1440,20 +1462,13 @@ void AVehicleConstruct::ServerRouteThrust(float DeltaSeconds)
 		}
 	}
 
-	// Cockpit gyro torque, scaled by total rigid body mass. Rotate intent is
-	// (pitch, yaw, roll): pitch turns about the cockpit RIGHT axis, yaw about
-	// UP, roll about FORWARD - not a raw vector rotation of the intent.
-	// Ground mode gates the gyro (default fully off): a rover gets no free
-	// mid-air attitude authority; steering comes from the wheels.
-	const float GyroFraction = ControlMode == EPilotControlMode::Ground ? GroundModeGyroFraction : 1.f;
-	if (PilotPawn && Cockpit && GyroFraction > KINDA_SMALL_NUMBER && !PilotInput.Rotate.IsNearlyZero())
+	// Gyro torque itself is applied in UGyroModule::TickModule, which runs one
+	// step after this router - the same split thrusters already use. A sleeping
+	// body will not wake from AddTorqueInRadians alone, so wake it here when
+	// the pilot asks for attitude.
+	if (!GyroCommandWorld.IsNearlyZero() && PhysicsRoot && !PhysicsRoot->RigidBodyIsAwake())
 	{
-		const FVector Rotate = PilotInput.Rotate.GetClampedToMaxSize(1.f);
-		const FVector TorqueWorld =
-			CockpitQuat.GetAxisY() * Rotate.X +   // pitch
-			CockpitQuat.GetAxisZ() * Rotate.Y +   // yaw
-			CockpitQuat.GetAxisX() * Rotate.Z;    // roll
-		PhysicsRoot->AddTorqueInRadians(TorqueWorld * RotationTorquePerKg * PhysicsRoot->GetMass() * GyroFraction);
+		PhysicsRoot->WakeAllRigidBodies();
 	}
 }
 
@@ -1665,6 +1680,7 @@ FVehicleDrivetrainSummary AVehicleConstruct::GetDrivetrainSummary() const
 	Summary.bParkingBrake = bParkingBrakeEngaged;
 	Summary.bCanDrive = HasCompleteWheel();
 	Summary.bCanFly = HasCompleteThruster();
+	Summary.GyroTorqueNm = GetInstalledGyroTorqueNm();
 	bool bFirst = true;
 	for (const FVehicleWheelStateItem& Item : WheelStates.Items)
 	{
@@ -1693,6 +1709,21 @@ bool AVehicleConstruct::HasCompleteWheel() const
 		}
 	}
 	return false;
+}
+
+float AVehicleConstruct::GetInstalledGyroTorqueNm() const
+{
+	// Record-driven, never the server-only Modules map: GetDrivetrainSummary
+	// feeds the HUD on both sides.
+	float Total = 0.f;
+	for (const FVehicleBlockRecord& Record : BlockList.Blocks)
+	{
+		if (Record.Phase == EConstructionPhase::Complete && Record.Def)
+		{
+			Total += FMath::Max(0.f, Record.Def->MaxGyroTorqueNm);
+		}
+	}
+	return Total;
 }
 
 bool AVehicleConstruct::HasCompleteThruster() const
@@ -1901,15 +1932,22 @@ void AVehicleConstruct::RebuildDerivedState()
 		}
 
 		// Placeholder meshes are ~100 cm shapes; cells are 25 cm. Scale each
-		// instance so the mesh exactly fills the block's UNROTATED footprint
-		// (FTransform applies scale before rotation, so per-axis is safe).
-		FTransform LocalTransform = GetBlockLocalTransform(Record);
+		// instance so the mesh exactly fills the block's UNROTATED footprint.
+		// MeshRelativeTransform maps the MESH onto the block frame (the 90 deg
+		// roll that stands the engine cylinder on its side for a wheel), so
+		// the cell target must be pulled back through that rotation before it
+		// becomes a per-axis scale - otherwise a rolled mesh is stretched on
+		// the wrong axes. Composition order: scale, then mesh alignment, then
+		// the block's own orientation, so nothing rotates twice.
+		const FTransform& MeshXf = Record.Def->MeshRelativeTransform;
 		const FVector MeshSize = Mesh->GetBoundingBox().GetSize();
 		const FVector TargetSize = FVector(Record.Def->SizeInCells) * CellSize;
-		LocalTransform.SetScale3D(FVector(
-			MeshSize.X > 0.f ? TargetSize.X / MeshSize.X : 1.f,
-			MeshSize.Y > 0.f ? TargetSize.Y / MeshSize.Y : 1.f,
-			MeshSize.Z > 0.f ? TargetSize.Z / MeshSize.Z : 1.f));
+		const FVector TargetInMeshFrame = MeshXf.GetRotation().UnrotateVector(TargetSize).GetAbs();
+		const FTransform ScaleXf(FQuat::Identity, FVector::ZeroVector, FVector(
+			MeshSize.X > 0.f ? TargetInMeshFrame.X / MeshSize.X : 1.f,
+			MeshSize.Y > 0.f ? TargetInMeshFrame.Y / MeshSize.Y : 1.f,
+			MeshSize.Z > 0.f ? TargetInMeshFrame.Z / MeshSize.Z : 1.f));
+		const FTransform LocalTransform = ScaleXf * MeshXf * GetBlockLocalTransform(Record);
 
 		if (Record.Phase == EConstructionPhase::Complete)
 		{

@@ -123,6 +123,18 @@ uint8 Inverse(uint8 Orientation)
 	return GetTables().InverseTable[Orientation];
 }
 
+uint8 FindOrientationMappingAxis(const FVector& LocalAxis, const FVector& TargetWorld, float Tolerance)
+{
+	for (uint8 Candidate = 0; Candidate < NumOrientations; ++Candidate)
+	{
+		if (GetQuat(Candidate).RotateVector(LocalAxis).Equals(TargetWorld, Tolerance))
+		{
+			return Candidate;
+		}
+	}
+	return 0;
+}
+
 uint8 CycleYaw(uint8 Orientation, int32 Steps)
 {
 	if (Orientation >= NumOrientations)

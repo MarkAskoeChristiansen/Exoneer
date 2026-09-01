@@ -377,6 +377,18 @@ blocks["solar"] = ensure_block(
     [make_stage([make_entry(items["silicon_wafer"], 1), make_entry(items["plate"], 1)], 2.0)],
     module=module_class("SolarModule"), mass=30, health=120, power=1200.0)
 
+# Attitude gyro: a 50 cm reaction-wheel triad (2x2x2 cells). 2000 N*m on a
+# ~3 t rover is roughly 0.6-0.7 rad/s^2 in yaw and enough to right a hop -
+# usable authority, far short of the old free-attitude magic. Orientation is
+# irrelevant (the rating is isotropic), so it stays on the four-yaw aim list.
+blocks["gyro"] = ensure_block(
+    "DA_Block_Gyro", "gyro_triad", "Attitude Gyro", CUBE,
+    [make_stage([make_entry(items["motor"], 2), make_entry(items["computer_board"], 2),
+                 make_entry(items["plate"], 2)], 4.0)],
+    module=module_class("GyroModule"), mass=180, health=260, power=-450.0,
+    size_in_cells=(2, 2, 2),
+    extra={"max_gyro_torque_nm": 2000.0})
+
 # Wheels: 3x1x3 cells (75 cm block housing a 70 cm tire with bulge clearance).
 # Terramechanics constants ride the C++ FVehicleWheelSpec defaults - only the
 # per-block differences are authored here. The Z-aligned engine cylinder is
@@ -566,7 +578,7 @@ char_cdo.set_editor_property("quick_bar", [
     pieces["foundation"], pieces["wall"], pieces["roof"],
     pieces["solar"], pieces["battery"], pieces["refinery"],
     pieces["fabricator"], pieces["oxygen_generator"],
-    blocks["frame"], blocks["cockpit"], blocks["thruster"],
+    blocks["frame"], blocks["cockpit"], blocks["thruster"], blocks["gyro"],
     blocks["battery"], blocks["solar"],
     blocks["wheel_steer"], blocks["wheel_drive"],
 ])

@@ -133,7 +133,10 @@ public:
 	TObjectPtr<UStaticMeshComponent> PhysicsRoot;
 
 	// --- Tunables ---
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Vehicle") float RotationTorquePerKg = 800.f;
+	// (The old mass-scaled RotationTorquePerKg gyro is gone: attitude torque
+	// now comes only from installed gyro blocks, which have a rated capacity,
+	// a power cost and a momentum budget. GAME-SCOPE section 7 forbids the
+	// magic-authority version.)
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Vehicle") int32 ScrapInsteadOfSplitMaxBlocks = 1;
 
 	/** Server holds the last pilot packet this long; past it, axes zero and the parking brake engages. */
@@ -150,13 +153,6 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Vehicle|Physics") float AngularDampingNoWheels = 2.0f;
 	UPROPERTY(EditAnywhere, Category = "Vehicle|Physics") float LinearDampingWheeled = 0.01f;
 	UPROPERTY(EditAnywhere, Category = "Vehicle|Physics") float AngularDampingWheeled = 0.05f;
-
-	/**
-	 * Gyro torque multiplier while in Ground control mode. 0 by default: a
-	 * rover in the air is ballistic; free attitude authority is a Flight-mode
-	 * (thruster craft) legacy, flagged in the scope gap map.
-	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Vehicle") float GroundModeGyroFraction = 0.f;
 
 	/**
 	 * Keyboard throttle is binary; the drive command ramps toward it so a tap
@@ -221,6 +217,10 @@ public:
 	/** Any Complete block whose module is a thruster (the craft can fly). */
 	UFUNCTION(BlueprintPure, Category = "Vehicle")
 	bool HasCompleteThruster() const;
+
+	/** Total installed reaction torque (N*m) over Complete gyro blocks. Record-driven, so valid on clients too. */
+	UFUNCTION(BlueprintPure, Category = "Vehicle")
+	float GetInstalledGyroTorqueNm() const;
 
 	/** Persistent per-wheel settings queued by the save-load path until the module spawns. */
 	struct FWheelSavedState

@@ -24,6 +24,15 @@ namespace ExoneerVehicleOrientation
 	/** Orientation that undoes the given one. */
 	EXONEER_API uint8 Inverse(uint8 Orientation);
 
+	/**
+	 * First orientation index whose rotation maps LocalAxis onto TargetWorld
+	 * (both unit axis vectors). Returns 0 (identity) when nothing matches, so
+	 * a caller asking for a non-axis-aligned target gets identity, never a
+	 * near miss. Shared by the build tool's aim list and the rover spawner so
+	 * they can never disagree about which index means "thrust up".
+	 */
+	EXONEER_API uint8 FindOrientationMappingAxis(const FVector& LocalAxis, const FVector& TargetWorld, float Tolerance = 0.01f);
+
 	/** Next orientation when the player taps rotate: cycles yaw, then up axis. */
 	EXONEER_API uint8 CycleYaw(uint8 Orientation, int32 Steps = 1);
 	EXONEER_API uint8 CycleUpAxis(uint8 Orientation, int32 Steps = 1);

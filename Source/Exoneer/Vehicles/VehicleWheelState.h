@@ -92,4 +92,6 @@ struct FVehicleDrivetrainSummary
 	UPROPERTY(BlueprintReadOnly, Category = "Vehicle") bool bParkingBrake = false;
 	UPROPERTY(BlueprintReadOnly, Category = "Vehicle") bool bCanDrive = false;
 	UPROPERTY(BlueprintReadOnly, Category = "Vehicle") bool bCanFly = false;
+	/** Total installed gyro torque (N*m). 0 = no attitude authority at all. */
+	UPROPERTY(BlueprintReadOnly, Category = "Vehicle") float GyroTorqueNm = 0.f;
 };

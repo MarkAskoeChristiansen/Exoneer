@@ -92,6 +92,62 @@ void UBuildToolComponent::SetBuildModeEnabled(bool bEnabled)
 	Mode = (SelectedBlock && !SelectedPiece) ? EBuildToolMode::VehiclePlacement : EBuildToolMode::BasePlacement;
 }
 
+namespace
+{
+	struct FCuratedOrientation
+	{
+		uint8 Index = 0;
+		const TCHAR* Label = TEXT("");
+	};
+
+	/**
+	 * Thrusters push along block local -X: six aim directions, UP first
+	 * (hover thrust is the common case). Cycling 24 raw orientations to aim
+	 * one thruster was the opposite of an interface.
+	 */
+	const TArray<FCuratedOrientation>& GetThrustOrientations()
+	{
+		static const TArray<FCuratedOrientation> Set = []
+		{
+			const FVector& ThrustAxis = ExoneerThruster::LocalThrustAxis;
+			return TArray<FCuratedOrientation>{
+				{ ExoneerVehicleOrientation::FindOrientationMappingAxis(ThrustAxis, FVector::UpVector), TEXT("THRUST: UP") },
+				{ ExoneerVehicleOrientation::FindOrientationMappingAxis(ThrustAxis, FVector::ForwardVector), TEXT("THRUST: FORWARD") },
+				{ ExoneerVehicleOrientation::FindOrientationMappingAxis(ThrustAxis, FVector::BackwardVector), TEXT("THRUST: BACK") },
+				{ ExoneerVehicleOrientation::FindOrientationMappingAxis(ThrustAxis, FVector::LeftVector), TEXT("THRUST: LEFT") },
+				{ ExoneerVehicleOrientation::FindOrientationMappingAxis(ThrustAxis, FVector::RightVector), TEXT("THRUST: RIGHT") },
+				{ ExoneerVehicleOrientation::FindOrientationMappingAxis(ThrustAxis, FVector::DownVector), TEXT("THRUST: DOWN") },
+			};
+		}();
+		return Set;
+	}
+
+	/** Everything else on the grid only meaningfully yaws (cockpit facing, wheel axle, symmetric boxes). */
+	const TArray<FCuratedOrientation>& GetYawOrientations()
+	{
+		static const TArray<FCuratedOrientation> Set = []
+		{
+			return TArray<FCuratedOrientation>{
+				{ ExoneerVehicleOrientation::FindOrientationMappingAxis(FVector::ForwardVector, FVector::ForwardVector), TEXT("YAW 0") },
+				{ ExoneerVehicleOrientation::FindOrientationMappingAxis(FVector::ForwardVector, FVector::RightVector), TEXT("YAW 90") },
+				{ ExoneerVehicleOrientation::FindOrientationMappingAxis(FVector::ForwardVector, FVector::BackwardVector), TEXT("YAW 180") },
+				{ ExoneerVehicleOrientation::FindOrientationMappingAxis(FVector::ForwardVector, FVector::LeftVector), TEXT("YAW 270") },
+			};
+		}();
+		return Set;
+	}
+
+	const TArray<FCuratedOrientation>& GetOrientationSetFor(const UVehicleBlockDefinitionDataAsset* Block)
+	{
+		// Ask the question that matters - does this block push along its local
+		// -X? A value test on MaxThrust answers a different question and would
+		// hijack any future non-thruster block that happens to rate a force.
+		const bool bThruster = Block && Block->ModuleClass
+			&& Block->ModuleClass->IsChildOf(UThrusterModule::StaticClass());
+		return bThruster ? GetThrustOrientations() : GetYawOrientations();
+	}
+}
+
 void UBuildToolComponent::SetSelectedPiece(UPieceDefinitionDataAsset* Piece)
 {
 	SelectedPiece = Piece;
@@ -107,6 +163,21 @@ void UBuildToolComponent::SetSelectedVehicleBlock(UVehicleBlockDefinitionDataAss
 {
 	SelectedBlock = Block;
 	SelectedPiece = nullptr;
+
+	// Snap the persistent orientation into the new block's curated set.
+	// Carrying a thruster aim index onto a wheel plants the axle VERTICAL and
+	// the label falls through to "ORIENT n" with nothing on screen explaining
+	// why the vehicle will not drive.
+	if (SelectedBlock)
+	{
+		const TArray<FCuratedOrientation>& Set = GetOrientationSetFor(SelectedBlock);
+		const bool bInSet = Set.ContainsByPredicate(
+			[this](const FCuratedOrientation& Entry) { return Entry.Index == Orientation; });
+		if (!bInSet && Set.Num() > 0)
+		{
+			Orientation = Set[0].Index;
+		}
+	}
 	if (Mode != EBuildToolMode::None)
 	{
 		Mode = EBuildToolMode::VehiclePlacement;
@@ -117,70 +188,6 @@ void UBuildToolComponent::SetSelectedVehicleBlock(UVehicleBlockDefinitionDataAss
 UPrimaryDataAsset* UBuildToolComponent::GetSelected() const
 {
 	return SelectedPiece ? static_cast<UPrimaryDataAsset*>(SelectedPiece.Get()) : static_cast<UPrimaryDataAsset*>(SelectedBlock.Get());
-}
-
-namespace
-{
-	struct FCuratedOrientation
-	{
-		uint8 Index = 0;
-		const TCHAR* Label = TEXT("");
-	};
-
-	/** First of the 24 orientations whose rotation maps LocalAxis onto TargetWorld. */
-	uint8 FindOrientationFor(const FVector& LocalAxis, const FVector& TargetWorld)
-	{
-		for (uint8 Candidate = 0; Candidate < ExoneerVehicleOrientation::NumOrientations; ++Candidate)
-		{
-			if (ExoneerVehicleOrientation::GetQuat(Candidate).RotateVector(LocalAxis).Equals(TargetWorld, 0.01f))
-			{
-				return Candidate;
-			}
-		}
-		return 0;
-	}
-
-	/**
-	 * Thrusters push along block local -X: six aim directions, UP first
-	 * (hover thrust is the common case). Cycling 24 raw orientations to aim
-	 * one thruster was the opposite of an interface.
-	 */
-	const TArray<FCuratedOrientation>& GetThrustOrientations()
-	{
-		static const TArray<FCuratedOrientation> Set = []
-		{
-			const FVector ThrustAxis(-1.f, 0.f, 0.f);
-			return TArray<FCuratedOrientation>{
-				{ FindOrientationFor(ThrustAxis, FVector::UpVector), TEXT("THRUST: UP") },
-				{ FindOrientationFor(ThrustAxis, FVector::ForwardVector), TEXT("THRUST: FORWARD") },
-				{ FindOrientationFor(ThrustAxis, FVector::BackwardVector), TEXT("THRUST: BACK") },
-				{ FindOrientationFor(ThrustAxis, FVector::LeftVector), TEXT("THRUST: LEFT") },
-				{ FindOrientationFor(ThrustAxis, FVector::RightVector), TEXT("THRUST: RIGHT") },
-				{ FindOrientationFor(ThrustAxis, FVector::DownVector), TEXT("THRUST: DOWN") },
-			};
-		}();
-		return Set;
-	}
-
-	/** Everything else on the grid only meaningfully yaws (cockpit facing, wheel axle, symmetric boxes). */
-	const TArray<FCuratedOrientation>& GetYawOrientations()
-	{
-		static const TArray<FCuratedOrientation> Set = []
-		{
-			return TArray<FCuratedOrientation>{
-				{ FindOrientationFor(FVector::ForwardVector, FVector::ForwardVector), TEXT("YAW 0") },
-				{ FindOrientationFor(FVector::ForwardVector, FVector::RightVector), TEXT("YAW 90") },
-				{ FindOrientationFor(FVector::ForwardVector, FVector::BackwardVector), TEXT("YAW 180") },
-				{ FindOrientationFor(FVector::ForwardVector, FVector::LeftVector), TEXT("YAW 270") },
-			};
-		}();
-		return Set;
-	}
-
-	const TArray<FCuratedOrientation>& GetOrientationSetFor(const UVehicleBlockDefinitionDataAsset* Block)
-	{
-		return Block && Block->MaxThrust > 0.f ? GetThrustOrientations() : GetYawOrientations();
-	}
 }
 
 void UBuildToolComponent::CycleOrientation(int32 Steps)

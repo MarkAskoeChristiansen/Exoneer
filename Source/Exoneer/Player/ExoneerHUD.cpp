@@ -120,6 +120,16 @@ void AExoneerHUD::DrawPilotPanel(const APlayerSurvivalCharacter* Engineer)
 	const float SupplyPct = Construct->PowerSupplyFraction * 100.f;
 	DrawReadout(X, Y, TEXT("PWR SUPPLY"), FString::Printf(TEXT("%.0f%%"), SupplyPct), SupplyPct < 75.f ? VisorWarn : VisorMain);
 
+	// Attitude authority is now physical: no gyro blocks, no rotation.
+	if (Drivetrain.GyroTorqueNm > 0.f)
+	{
+		DrawReadout(X, Y, TEXT("GYRO"), FString::Printf(TEXT("%.0f Nm"), Drivetrain.GyroTorqueNm), VisorMain);
+	}
+	else if (Drivetrain.bCanFly)
+	{
+		DrawReadout(X, Y, TEXT("GYRO"), TEXT("NONE - no attitude ctrl"), VisorWarn);
+	}
+
 	if (Drivetrain.WheelCount > 0)
 	{
 		// Optimal traction window is s = 0.15..0.25 (GAME-SCOPE 4.1): green

@@ -57,6 +57,12 @@ protected:
 	int32 BlockInstanceId = INDEX_NONE;
 };
 
+/** Thruster convention in one place: force acts along block local -X, exhaust out of +X. */
+namespace ExoneerThruster
+{
+	inline const FVector LocalThrustAxis(-1.f, 0.f, 0.f);
+}
+
 /**
  * Thrust along the block's local -X face (exhaust out of +X), scaled by
  * throttle and the construct's power supply. Writes throttle to the record's
@@ -100,4 +106,49 @@ class EXONEER_API USolarModule : public UVehicleModule
 
 public:
 	virtual float GetCurrentProduction() const override;
+};
+
+/**
+ * Attitude control: a three-axis reaction wheel triad in one block.
+ *
+ * A reaction wheel is an INTERNAL actuator. Spinning its rotors one way
+ * torques the hull the other way, so it can point the vehicle but can never
+ * change the total angular momentum of hull + rotors, and it saturates once
+ * the rotors reach their speed limit. Both properties are modelled: torque is
+ * capped at the block's rating and integrates into a stored momentum vector,
+ * and a saturated axis stops producing torque in that direction until the
+ * momentum is dumped against an external torque (the ground, through the
+ * wheels).
+ *
+ * The gyroscopic cross term -w x h is applied too: a wound-up rotor visibly
+ * resists rotation about the other axes, which is what a gyro stabiliser
+ * physically does. At 0.5 rad/s with a full rotor it is larger than the
+ * device rating itself, so omitting it would be dropping the dominant term.
+ */
+UCLASS()
+class EXONEER_API UGyroModule : public UVehicleModule
+{
+	GENERATED_BODY()
+
+public:
+	virtual void TickModule(float DeltaSeconds) override;
+	virtual float GetCurrentDraw() const override;
+
+	/** SERVER. Desired torque direction in world space, magnitude 0..1. Set by the construct's input router each tick. */
+	FVector CommandWorld = FVector::ZeroVector;
+
+	/** Rated torque per axis (N*m), resolved from the block definition at Initialize. */
+	float RatedTorqueNm = 0.f;
+
+	virtual void Initialize(AVehicleConstruct* InConstruct, int32 InBlockInstanceId) override;
+
+private:
+	/** Stored rotor momentum in CONSTRUCT-LOCAL axes (N*m*s). Saturates at RatedTorqueNm * SaturationSeconds. */
+	FVector StoredMomentumLocal = FVector::ZeroVector;
+
+	/** Seconds of full-rating torque the rotors can absorb before saturating. */
+	float SaturationSeconds = 5.f;
+
+	/** Last commanded torque magnitude as a fraction of rating, for the power draw. */
+	float LastCommandFraction = 0.f;
 };

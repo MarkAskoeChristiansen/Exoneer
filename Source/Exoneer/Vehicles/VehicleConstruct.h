@@ -158,6 +158,22 @@ public:
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Vehicle") float GroundModeGyroFraction = 0.f;
 
+	/**
+	 * Keyboard throttle is binary; the drive command ramps toward it so a tap
+	 * of W creeps instead of instantly commanding full torque into wheelspin.
+	 * Ramp-down is faster so lifting off responds immediately.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Vehicle") float DriveThrottleRampUpPerSec = 1.2f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Vehicle") float DriveThrottleRampDownPerSec = 4.f;
+
+	/**
+	 * Stock motor-controller anti-burnout: torque tapers above this slip
+	 * ratio and cuts fully at it. Crude on purpose - the Shear Control talent
+	 * later holds the precise 0.15-0.25 optimal window; this only prevents
+	 * the runaway spin-to-full-slip dig-in on a held key.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Vehicle") float StockSlipCap = 0.85f;
+
 	// --- Replicated state ---
 	UPROPERTY(Replicated, VisibleAnywhere, BlueprintReadOnly, Category = "Vehicle")
 	float PowerSupplyFraction = 1.f;
@@ -342,6 +358,9 @@ protected:
 	/** SERVER. Rolling-counter bookkeeping for the mode toggle. */
 	uint8 LastProcessedModeToggle = 0;
 	bool bModeToggleSyncPending = true;
+
+	/** SERVER. Ramped drive throttle (see DriveThrottleRamp* tunables). */
+	float CurrentDriveThrottle = 0.f;
 
 public:
 	/**

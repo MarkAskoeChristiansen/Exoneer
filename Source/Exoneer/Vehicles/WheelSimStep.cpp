@@ -98,7 +98,11 @@ FWheelSimForce StepWheel(float Dt, const FWheelSimInputItem& Input, const FWheel
 	const FWheelContactSolution Contact = SolveWheelContact(NormalLoad, Config.WidthM, Config.RadiusM,
 		Command.TirePressurePa, Command.CarcassPressurePa, Ground.Soil, State.PrevSlipAbs, State.bPrevRigid);
 	State.bPrevRigid = Contact.bRigid;
-	State.PrevRadialDropM = Contact.bRigid ? Contact.SinkageM : Contact.DeflectionM;
+	// Low-pass the radial drop (~30 ms time constant at 120 Hz): soil failure
+	// does not teleport, and the raw one-substep lag let sinkage flap with the
+	// slip state, spiking the suspension into a visible bounce.
+	const float TargetRadialDrop = Contact.bRigid ? Contact.SinkageM : Contact.DeflectionM;
+	State.PrevRadialDropM = FMath::Lerp(State.PrevRadialDropM, TargetRadialDrop, 0.3f);
 	const float EffectiveRadius = FMath::Max(Contact.EffectiveRadiusM, 0.05f);
 
 	// --- Contact frame and slip. ---
@@ -118,9 +122,22 @@ FWheelSimForce StepWheel(float Dt, const FWheelSimInputItem& Input, const FWheel
 	const float LongitudinalSpeed = FVector::DotProduct(ContactVelocity, LongitudinalDir);
 	const float LateralSpeed = FVector::DotProduct(ContactVelocity, LateralDir);
 
-	const float Slip = SlipRatio(State.OmegaRadS * EffectiveRadius, LongitudinalSpeed);
+	const float WheelSurfaceSpeed = State.OmegaRadS * EffectiveRadius;
+	const float Slip = SlipRatio(WheelSurfaceSpeed, LongitudinalSpeed);
 	const float Alpha = SlipAngle(LateralSpeed, LongitudinalSpeed);
-	State.PrevSlipAbs = FMath::Abs(Slip);
+
+	// The regularized ratio is right for the SHEAR FORCES but poisonous for
+	// everything slower-acting: near standstill a barely-creeping wheel reads
+	// ~100 percent slip, which inflated the slip-sinkage exponent (phantom
+	// dig-in while parked) and made the governor cut launch torque the moment
+	// the wheel began to turn - a bang-bang limit cycle that visibly shook
+	// the rover. Physically, slip SINKAGE follows the soil excavation rate,
+	// i.e. the slip VELOCITY |v_w - v_x|, so attenuate by it: a wheel truly
+	// spinning against stuck ground still digs at full strength, a wheel
+	// creeping at millimeters per second digs not at all.
+	const float SlipVelocity = FMath::Abs(WheelSurfaceSpeed - LongitudinalSpeed);
+	const float SlipActivity = FMath::Clamp(SlipVelocity / 0.3f, 0.f, 1.f);
+	State.PrevSlipAbs = FMath::Abs(Slip) * SlipActivity;
 
 	// --- Shear forces (one soil budget, friction ellipse emerges). ---
 	const FShearForces Shear = CombinedShearForces(Contact.ContactAreaM2, NormalLoad, Slip, Alpha, Contact.PatchLengthM, Ground.Soil);

@@ -398,7 +398,7 @@ def make_wheel_mesh_transform():
 wheel_stage = [make_stage([make_entry(items["tire"], 1), make_entry(items["motor"], 1), make_entry(items["plate"], 1)], 3.5)]
 blocks["wheel_steer"] = ensure_block(
     "DA_Block_WheelSteer", "wheel_steer", "Steering Wheel Assembly", CYLINDER,
-    wheel_stage, module=module_class("WheelModule"), mass=90, health=250, power=-2500.0,
+    wheel_stage, module=module_class("WheelModule"), mass=90, health=250, power=-4000.0,
     size_in_cells=(3, 1, 3),
     extra={
         "is_wheel": True,
@@ -408,7 +408,7 @@ blocks["wheel_steer"] = ensure_block(
     })
 blocks["wheel_drive"] = ensure_block(
     "DA_Block_WheelDrive", "wheel_drive", "Drive Wheel Assembly", CYLINDER,
-    wheel_stage, module=module_class("WheelModule"), mass=90, health=250, power=-2500.0,
+    wheel_stage, module=module_class("WheelModule"), mass=90, health=250, power=-4000.0,
     size_in_cells=(3, 1, 3),
     extra={
         "is_wheel": True,
@@ -684,8 +684,10 @@ def ensure_test_slab(label, loc, rot, scale, mic=None):
 
 # Sand field: the main sinkage/CTIS arena (spawn to its west edge is ~20 m of
 # hard slab - the baseline drive). Clay field: the low-phi traction arena.
-ensure_test_slab("TestField_Sand", (6000, 2000, -27), (0, 0, 0), (80, 60, 0.5), mi_sand)
-ensure_test_slab("TestField_Clay", (6000, -4000, -27), (0, 0, 0), (80, 40, 0.5), mi_clay)
+# Centers at -26, not -27: tops sit 1 cm proud of the slab instead of
+# coplanar (coplanar z-fights and flickers).
+ensure_test_slab("TestField_Sand", (6000, 2000, -26), (0, 0, 0), (80, 60, 0.5), mi_sand)
+ensure_test_slab("TestField_Clay", (6000, -4000, -26), (0, 0, 0), (80, 40, 0.5), mi_clay)
 
 # Sand-surfaced ramps rising east off the sand field; lower edge buried a few
 # uu below grade so there is no lip. Center Z derivation for scale (25,10,0.4):
@@ -699,6 +701,33 @@ ensure_test_slab("TestRamp_20deg", (10500, 500, 403), (0, 20, 0), (25, 10, 0.4),
 ensure_test_slab("TestPit_Curb_N", (4000, 4200, 8), (0, 0, 0), (14, 0.4, 0.5))
 ensure_test_slab("TestPit_Curb_S", (4000, 2800, 8), (0, 0, 0), (14, 0.4, 0.5))
 ensure_test_slab("TestPit_Curb_E", (4700, 3500, 8), (0, 0, 90), (14, 0.4, 0.5))
+
+# Garage: a pad near spawn with a ready-built rover on it (spawned at game
+# start by ATestRoverSpawner unless a construct already exists nearby) - the
+# first drive needs zero editor work and zero in-game construction.
+ensure_test_slab("GaragePad", (900, -500, -26), (0, 0, 0), (12, 8, 0.5))
+spawner_class = unreal.load_class(None, "/Script/Exoneer.TestRoverSpawner")
+if spawner_class is None:
+    raise RuntimeError("TestRoverSpawner class not found - build the C++ module first")
+ensure_actor("TestRoverSpawner", spawner_class, (900, -500, 0), (0, 0, 0))
+
+# World-space navigation signs (no UI, scope module 8 stays clean).
+def ensure_sign(label, text, loc, yaw=180.0, size=180.0):
+    actor = ensure_actor(label, unreal.TextRenderActor, loc, (0, 0, yaw))
+    try:
+        comp = actor.get_editor_property("text_render")
+        comp.set_editor_property("text", unreal.Text(text))
+        comp.set_editor_property("world_size", size)
+        comp.set_editor_property("text_render_color", unreal.Color(140, 230, 255, 255))
+    except Exception as sign_error:
+        log("sign '%s' skipped: %s" % (label, sign_error))
+    return actor
+
+ensure_sign("Sign_Garage", "GARAGE - PRESS F TO DRIVE", (900, -500, 320), yaw=180, size=120)
+ensure_sign("Sign_Sand", "SAND FIELD", (2100, 2000, 320))
+ensure_sign("Sign_Clay", "CLAY FIELD", (2100, -4000, 320))
+ensure_sign("Sign_Ramps", "RAMPS 10 / 20 DEG", (9100, 2000, 420))
+ensure_sign("Sign_CurbBay", "CURB BAY", (3200, 3500, 320))
 
 les.save_current_level()
 log("test range ensured")

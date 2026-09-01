@@ -1432,9 +1432,17 @@ void AVehicleConstruct::ServerRouteDrive(float DeltaSeconds)
 	// and service brake (the parking brake still applies through the flag),
 	// so a rover with thrusters cannot double-drive.
 	const bool bGround = ControlMode == EPilotControlMode::Ground;
-	const float ThrottleCmd = bGround && PilotPawn ? PilotInput.Throttle : 0.f;
+	const float ThrottleTarget = bGround && PilotPawn ? PilotInput.Throttle : 0.f;
 	const float SteerCmd = bGround && PilotPawn ? PilotInput.Steer : 0.f;
 	const float BrakeCmd = bGround && PilotPawn ? PilotInput.Brake : 0.f;
+
+	// Ramp the binary keyboard throttle so W taps creep and holds build up.
+	const float RampRate = FMath::Abs(ThrottleTarget) > FMath::Abs(CurrentDriveThrottle)
+		? DriveThrottleRampUpPerSec
+		: DriveThrottleRampDownPerSec;
+	CurrentDriveThrottle += FMath::Clamp(ThrottleTarget - CurrentDriveThrottle,
+		-RampRate * DeltaSeconds, RampRate * DeltaSeconds);
+	const float ThrottleCmd = CurrentDriveThrottle;
 	// CTIS hold-to-pump (H up / G down): a physical valve rate in the module.
 	const int32 CtisDir = bGround && PilotPawn
 		? ((PilotInput.HeldFlags & EPilotHeldFlags::CtisUp) ? 1 : 0) - ((PilotInput.HeldFlags & EPilotHeldFlags::CtisDown) ? 1 : 0)
@@ -1518,7 +1526,7 @@ void AVehicleConstruct::ServerRouteDrive(float DeltaSeconds)
 		Wheel->BrakeCommand = BrakeCmd;
 		Wheel->bParkingBrake = bParkingBrakeEngaged;
 		Wheel->CtisPumpDirection = CtisDir;
-		Wheel->TargetSlipCap = 1.f;   // Shear Control talent lowers this to ~0.3 when talents land.
+		Wheel->TargetSlipCap = StockSlipCap;   // Shear Control talent lowers this to ~0.3 when talents land.
 
 		float TargetSteer = 0.f;
 		if (Spec.bSteerable)
@@ -1751,13 +1759,16 @@ void AVehicleConstruct::RebuildDerivedState()
 		// ride height (a full-size rigid box would touch ground first and the
 		// soil model would never engage), while the core still hard-stops
 		// curbs and full-compression terrain clips, and still welds its mass.
+		// 0.35 r, not 0.5 r: at half radius the core touched ground at 17.5 cm
+		// sinkage and Chaos contacts fought the soil model (wheel jitter when
+		// dug in deep).
 		if (bComplete && Record.Def->bIsWheel)
 		{
 			const FVehicleWheelSpec& Wheel = Record.Def->WheelSpec;
 			Extent = FVector(
-				0.5f * Wheel.RadiusM * ExoneerUnits::CmPerM,
+				0.35f * Wheel.RadiusM * ExoneerUnits::CmPerM,
 				0.5f * Wheel.WidthM * ExoneerUnits::CmPerM,
-				0.5f * Wheel.RadiusM * ExoneerUnits::CmPerM);
+				0.35f * Wheel.RadiusM * ExoneerUnits::CmPerM);
 		}
 
 		UBoxComponent* Box = BlockBodies.FindRef(Record.BlockInstanceId);

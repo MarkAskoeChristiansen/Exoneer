@@ -36,13 +36,16 @@ struct FVehicleWheelSpec
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Suspension") float BumpStopNPerM = 400000.f;
 
 	// --- Drivetrain (ideal PMDC hub motor: T = T_s * (1 - w/w_0)) ---
+	// Sized so a ~1.6 t rover cruises ~11 m/s on clay and ~17 m/s on hard
+	// ground: the equilibrium speed is w_0 * (1 - T_needed/T_s) * r, and the
+	// first 250 Nm motors equilibrated at a crawl against soft-soil drag.
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Drive") bool bDriven = true;
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Drive") float MaxMotorTorqueNm = 250.f;
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Drive") float NoLoadSpeedRadS = 40.f;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Drive") float MaxMotorTorqueNm = 420.f;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Drive") float NoLoadSpeedRadS = 52.f;
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Drive", meta = (ClampMin = "0.1", ClampMax = "1"))
 	float DrivetrainEfficiency = 0.85f;
 	/** Resistive (I^2 R) loss at full stall torque - what a bogged motor burns as pure heat. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Drive") float CopperLossAtStallW = 2000.f;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Drive") float CopperLossAtStallW = 5000.f;
 	/** Constant motor-controller electronics draw while the block is Complete. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Drive") float ControllerIdleDrawW = 20.f;
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Drive") float MaxBrakeTorqueNm = 600.f;

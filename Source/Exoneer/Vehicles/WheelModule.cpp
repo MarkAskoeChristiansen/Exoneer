@@ -104,11 +104,16 @@ void UWheelModule::TickModule(float DeltaSeconds)
 	SteerAngleRad += FMath::Clamp(SteerTarget - SteerAngleRad, -SteerRate, SteerRate);
 
 	// Suspension probe (game thread only - scene queries are forbidden on the
-	// physics thread; substeps re-solve against this cached plane).
+	// physics thread; substeps re-solve against this cached plane). Start the
+	// ray a wheel radius ABOVE the block: a deeply sunk wheel would otherwise
+	// begin the trace inside the terrain collision, which registers no hit -
+	// contact flickers off, forces vanish, the body drops, and the wheels
+	// jitter (the "2/4 wheels" dropout).
 	const FTransform BlockWorld = Owner->GetBlockWorldTransform(*Record);
-	const FVector Start = BlockWorld.GetLocation();
 	const FVector AxisWorld = -BlockWorld.GetUnitAxis(EAxis::Z);
-	const float RayLengthUU = (Spec->RestLengthM + Spec->TravelM + Spec->RadiusM) * ExoneerUnits::CmPerM + 5.f;
+	const float StartOffsetUU = Spec->RadiusM * ExoneerUnits::CmPerM;
+	const FVector Start = BlockWorld.GetLocation() - AxisWorld * StartOffsetUU;
+	const float RayLengthUU = (Spec->RestLengthM + Spec->TravelM + Spec->RadiusM) * ExoneerUnits::CmPerM + StartOffsetUU + 5.f;
 
 	FCollisionQueryParams Params(SCENE_QUERY_STAT(ExoneerWheelProbe), /*bTraceComplex*/ false, Owner);
 	Params.bReturnPhysicalMaterial = true;

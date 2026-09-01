@@ -1416,6 +1416,10 @@ void AVehicleConstruct::ServerRouteDrive(float DeltaSeconds)
 	const float ThrottleCmd = bGround && PilotPawn ? PilotInput.Throttle : 0.f;
 	const float SteerCmd = bGround && PilotPawn ? PilotInput.Steer : 0.f;
 	const float BrakeCmd = bGround && PilotPawn ? PilotInput.Brake : 0.f;
+	// CTIS hold-to-pump (H up / G down): a physical valve rate in the module.
+	const int32 CtisDir = bGround && PilotPawn
+		? ((PilotInput.HeldFlags & EPilotHeldFlags::CtisUp) ? 1 : 0) - ((PilotInput.HeldFlags & EPilotHeldFlags::CtisDown) ? 1 : 0)
+		: 0;
 
 	// Ackermann reference frame: the active cockpit's local frame (actor axes
 	// without one, e.g. before the first seating).
@@ -1494,6 +1498,7 @@ void AVehicleConstruct::ServerRouteDrive(float DeltaSeconds)
 		Wheel->ThrottleCommand = Spec.bDriven ? ThrottleCmd : 0.f;
 		Wheel->BrakeCommand = BrakeCmd;
 		Wheel->bParkingBrake = bParkingBrakeEngaged;
+		Wheel->CtisPumpDirection = CtisDir;
 		Wheel->TargetSlipCap = 1.f;   // Shear Control talent lowers this to ~0.3 when talents land.
 
 		float TargetSteer = 0.f;

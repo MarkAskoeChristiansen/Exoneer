@@ -16,6 +16,8 @@ DIR_RECIPES = ROOT + "/Data/Recipes"
 DIR_BIOMES = ROOT + "/Data/Biomes"
 DIR_BP = ROOT + "/Blueprints"
 DIR_MAPS = ROOT + "/Maps"
+DIR_PHYSMATS = ROOT + "/PhysicalMaterials"
+DIR_MATS = ROOT + "/Materials"
 
 CUBE = unreal.load_asset("/Engine/BasicShapes/Cube")
 CYLINDER = unreal.load_asset("/Engine/BasicShapes/Cylinder")
@@ -314,12 +316,13 @@ pieces["solar"] = ensure_piece(
 log("--- vehicle blocks ---")
 
 def ensure_block(name, block_id, display, mesh, stages, module=None, mass=50.0,
-                 health=200.0, power=0.0, storage=0.0, thrust=0.0):
+                 health=200.0, power=0.0, storage=0.0, thrust=0.0,
+                 size_in_cells=(1, 1, 1), extra=None):
     asset = ensure_data_asset(name, DIR_BLOCKS, unreal.VehicleBlockDefinitionDataAsset)
     props = {
         "block_id": block_id,
         "display_name": unreal.Text(display),
-        "size_in_cells": unreal.IntVector(1, 1, 1),
+        "size_in_cells": unreal.IntVector(*size_in_cells),
         "mass": mass,
         "max_health": health,
         "stages": stages,
@@ -330,6 +333,9 @@ def ensure_block(name, block_id, display, mesh, stages, module=None, mass=50.0,
     }
     if module is not None:
         props["module_class"] = module
+    # Extension seam for block-type-specific fields (wheel spec etc.), same
+    # pattern as ensure_piece's machine dict.
+    props.update(extra or {})
     set_props(asset, props)
     return asset
 
@@ -411,6 +417,78 @@ set_props(biome, {
 })
 
 # ---------------------------------------------------------------------------
+# 6.5 Soil physical materials + ground materials (wheel terramechanics)
+# ---------------------------------------------------------------------------
+log("--- soils ---")
+
+# Physical materials are not data assets; they need their own factory.
+def ensure_phys_material(name, klass):
+    full = DIR_PHYSMATS + "/" + name
+    if eal.does_asset_exist(full):
+        return unreal.load_asset(full)
+    factory = unreal.PhysicalMaterialFactoryNew()
+    factory.set_editor_property("physical_material_class", klass)
+    asset = asset_tools.create_asset(name, DIR_PHYSMATS, klass, factory)
+    if asset is None:
+        raise RuntimeError("Failed to create physical material " + full)
+    log("created " + full)
+    return asset
+
+# Plain UObject-side class, resolved through reflection like module_class.
+soil_class = unreal.load_class(None, "/Script/Exoneer.ExoneerSoilPhysicalMaterial")
+if soil_class is None:
+    raise RuntimeError("ExoneerSoilPhysicalMaterial class not found - build the C++ module first")
+
+# Wong's published terrain values (docs/design/wheels/design-math-spec.md
+# section 2). Authored in kN/kPa/deg; C++ ToSoilParams() converts to SI once.
+pm_sand = ensure_phys_material("PM_Soil_DrySand", soil_class)
+set_props(pm_sand, {
+    "soil_display_name": unreal.Text("Dry Sand"),
+    "bekker_kc": 0.99, "bekker_kphi": 1528.43, "bekker_n": 1.1, "bekker_n1": 0.9,
+    "cohesion_kpa": 1.04, "friction_angle_deg": 28.0,
+    "shear_deformation_k": 0.025, "shear_deformation_ky": 0.030,
+    "unit_weight_kn_per_m3": 15.7,
+})
+pm_clay = ensure_phys_material("PM_Soil_Clay", soil_class)
+set_props(pm_clay, {
+    "soil_display_name": unreal.Text("Clayey Soil"),
+    "bekker_kc": 13.19, "bekker_kphi": 692.15, "bekker_n": 0.5, "bekker_n1": 0.4,
+    "cohesion_kpa": 4.14, "friction_angle_deg": 13.0,
+    "shear_deformation_k": 0.010, "shear_deformation_ky": 0.012,
+    "unit_weight_kn_per_m3": 16.8,
+})
+# Noted, not authored yet: sandy loam (5.27/1515.04/0.7/1.72 kPa/29 deg/0.025)
+# and snow (4.37/196.72/1.6/1.03 kPa/19.7 deg/0.04). Surfaces without a soil
+# physmat resolve as near-rigid ground in code; the tundra biome deliberately
+# sets no DefaultSoil so the ground slab stays firm.
+
+# Ground materials: the PhysMaterial rides on the material, not the mesh, and
+# only counts when the instance also sets bOverridePhysMaterial.
+BASE_MAT = unreal.load_asset("/Engine/BasicShapes/BasicShapeMaterial")
+
+def ensure_ground_mic(name, color, phys_mat):
+    full = DIR_MATS + "/" + name
+    if eal.does_asset_exist(full):
+        mic = unreal.load_asset(full)
+    else:
+        # The 5.8 factory exposes no initial_parent property; parent through
+        # MaterialEditingLibrary after creation instead (idempotent re-apply).
+        factory = unreal.MaterialInstanceConstantFactoryNew()
+        mic = asset_tools.create_asset(name, DIR_MATS, unreal.MaterialInstanceConstant, factory)
+        if mic is None:
+            raise RuntimeError("Failed to create material instance " + full)
+        log("created " + full)
+    unreal.MaterialEditingLibrary.set_material_instance_parent(mic, BASE_MAT)
+    unreal.MaterialEditingLibrary.set_material_instance_vector_parameter_value(
+        mic, "Color", unreal.LinearColor(*color))
+    mic.set_editor_property("phys_material", phys_mat)
+    mic.set_editor_property("override_phys_material", True)
+    return mic
+
+mi_sand = ensure_ground_mic("MI_Ground_DrySand", (0.76, 0.65, 0.42, 1.0), pm_sand)
+mi_clay = ensure_ground_mic("MI_Ground_Clay", (0.45, 0.28, 0.20, 1.0), pm_clay)
+
+# ---------------------------------------------------------------------------
 # 7. Blueprints
 # ---------------------------------------------------------------------------
 log("--- blueprints ---")
@@ -475,7 +553,7 @@ else:
     def spawn(cls, loc, rot=None):
         return eas.spawn_actor_from_class(cls, unreal.Vector(*loc), rot or unreal.Rotator(0, 0, 0))
 
-    # Ground slab: 4 km x 4 km, top surface at Z = 0.
+    # Ground slab: 400 m x 400 m (engine cube is 100 uu), top surface at Z = -2.
     ground = spawn(unreal.StaticMeshActor, (0, 0, -52))
     ground_mesh = ground.get_editor_property("static_mesh_component")
     ground_mesh.set_editor_property("static_mesh", CUBE)
@@ -516,6 +594,61 @@ else:
 
     les.save_current_level()
     log("map saved")
+
+# ---------------------------------------------------------------------------
+# 8.5 Wheel test range - unconditional ensure-actor pass
+# ---------------------------------------------------------------------------
+# The branch above is create-only: an existing L_StarterPlanet is loaded, never
+# updated. This pass runs on EVERY bootstrap, finds actors by label, spawns the
+# missing ones, and re-applies transforms/materials - so tuning here reaches
+# maps that already exist. Geometry facts: slab top is at Z = -2; the engine
+# cube is 100 uu; "top flush at -2" means center Z = -2 - 50 * scale_z.
+log("--- wheel test range ---")
+
+def ensure_actor(label, cls, loc, rot=(0.0, 0.0, 0.0), scale=(1.0, 1.0, 1.0)):
+    found = None
+    for existing in eas.get_all_level_actors():
+        if existing.get_actor_label() == label:
+            found = existing
+            break
+    rotator = unreal.Rotator(roll=rot[0], pitch=rot[1], yaw=rot[2])
+    if found is None:
+        found = eas.spawn_actor_from_class(cls, unreal.Vector(*loc), rotator)
+        found.set_actor_label(label)
+        log("spawned " + label)
+    found.set_actor_location(unreal.Vector(*loc), False, False)
+    found.set_actor_rotation(rotator, False)
+    found.set_actor_scale3d(unreal.Vector(*scale))
+    return found
+
+def ensure_test_slab(label, loc, rot, scale, mic=None):
+    actor = ensure_actor(label, unreal.StaticMeshActor, loc, rot, scale)
+    mesh_comp = actor.get_editor_property("static_mesh_component")
+    mesh_comp.set_editor_property("static_mesh", CUBE)
+    if mic is not None:
+        mesh_comp.set_material(0, mic)
+    return actor
+
+# Sand field: the main sinkage/CTIS arena (spawn to its west edge is ~20 m of
+# hard slab - the baseline drive). Clay field: the low-phi traction arena.
+ensure_test_slab("TestField_Sand", (6000, 2000, -27), (0, 0, 0), (80, 60, 0.5), mi_sand)
+ensure_test_slab("TestField_Clay", (6000, -4000, -27), (0, 0, 0), (80, 40, 0.5), mi_clay)
+
+# Sand-surfaced ramps rising east off the sand field; lower edge buried a few
+# uu below grade so there is no lip. Center Z derivation for scale (25,10,0.4):
+# centerZ - 1250*sin(pitch) + 20*cos(pitch) = -6  =>  191 @ 10deg, 403 @ 20deg.
+ensure_test_slab("TestRamp_10deg", (10500, 3500, 191), (0, 10, 0), (25, 10, 0.4), mi_sand)
+ensure_test_slab("TestRamp_20deg", (10500, 500, 403), (0, 20, 0), (25, 10, 0.4), mi_sand)
+
+# Curbed bay inside the sand field (the "pit": sinkage IS the depth - drive in
+# through the open west side, bog at full throttle; the ~35 cm hard curbs make
+# casual exits impossible, so recovery is managed slip + dropped tire pressure).
+ensure_test_slab("TestPit_Curb_N", (4000, 4200, 8), (0, 0, 0), (14, 0.4, 0.5))
+ensure_test_slab("TestPit_Curb_S", (4000, 2800, 8), (0, 0, 0), (14, 0.4, 0.5))
+ensure_test_slab("TestPit_Curb_E", (4700, 3500, 8), (0, 0, 90), (14, 0.4, 0.5))
+
+les.save_current_level()
+log("test range ensured")
 
 # ---------------------------------------------------------------------------
 # Save everything

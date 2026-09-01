@@ -6,6 +6,7 @@
 #include "PlanetEnvironmentManager.generated.h"
 
 class UPlanetBiomeDataAsset;
+class UExoneerSoilPhysicalMaterial;
 class ADirectionalLight;
 class ABasePiece;
 class ABaseStructure;
@@ -50,6 +51,9 @@ public:
 	/** Legacy alias for GetSunFraction, kept for v1 callers. */
 	UFUNCTION(BlueprintPure, Category = "Planet") float GetSunExposureFraction() const { return GetSunFraction(); }
 
+	/** Biome default substrate for wheels; null when the biome declares none (firm ground). */
+	const UExoneerSoilPhysicalMaterial* GetDefaultSoil() const;
+
 	UFUNCTION(BlueprintPure, Category = "Planet") float GetCurrentAmbientTemperatureC() const;
 	UFUNCTION(BlueprintPure, Category = "Planet") bool IsNight() const;
 	UFUNCTION(BlueprintPure, Category = "Planet") bool IsStormActive() const { return bStormActive; }
@@ -64,6 +68,9 @@ public:
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 
 protected:
+	/** Wires Biome->GravityZ into world settings on both sides - one gravity source for physics, characters, and wheels. */
+	virtual void BeginPlay() override;
+
 	UPROPERTY(ReplicatedUsing = OnRep_Storm)
 	bool bStormActive = false;
 

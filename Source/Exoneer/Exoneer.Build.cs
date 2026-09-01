@@ -24,6 +24,7 @@ public class Exoneer : ModuleRules
 			"Slate",
 			"SlateCore",
 			"PhysicsCore",
+			"Chaos",
 			"ChaosVehicles",
 			"GameplayTags",
 			"NetCore",

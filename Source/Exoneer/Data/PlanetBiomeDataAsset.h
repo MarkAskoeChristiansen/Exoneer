@@ -6,6 +6,7 @@
 #include "PlanetBiomeDataAsset.generated.h"
 
 class UItemDefinitionDataAsset;
+class UExoneerSoilPhysicalMaterial;
 
 USTRUCT(BlueprintType)
 struct FBiomeResourceSpawn
@@ -68,6 +69,14 @@ public:
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Biome")
 	TArray<FBiomeResourceSpawn> ResourceSpawns;
+
+	/**
+	 * Default substrate for wheel-terrain interaction when a hit surface has
+	 * no soil physical material of its own. Leave unset for firm ground (the
+	 * wheel solver falls back to a near-rigid code default).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Biome")
+	TObjectPtr<UExoneerSoilPhysicalMaterial> DefaultSoil;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Biome")
 	FLinearColor SkyHorizonColor = FLinearColor(0.6f, 0.4f, 0.8f);

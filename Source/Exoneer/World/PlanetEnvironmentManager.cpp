@@ -10,7 +10,9 @@
 #include "Components/DirectionalLightComponent.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
+#include "GameFramework/WorldSettings.h"
 #include "Net/UnrealNetwork.h"
+#include "Physics/ExoneerSoilPhysicalMaterial.h"
 
 APlanetEnvironmentManager::APlanetEnvironmentManager()
 {
@@ -29,6 +31,29 @@ void APlanetEnvironmentManager::GetLifetimeReplicatedProps(TArray<FLifetimePrope
 	DOREPLIFETIME(APlanetEnvironmentManager, TimeOfDay01);
 	DOREPLIFETIME(APlanetEnvironmentManager, bStormActive);
 	DOREPLIFETIME(APlanetEnvironmentManager, StormIntensity);
+}
+
+void APlanetEnvironmentManager::BeginPlay()
+{
+	Super::BeginPlay();
+
+	// One gravity source: the biome. Runs on server and client alike -
+	// deterministic from the asset, so both sides agree without replication.
+	// Every consumer (Chaos bodies, character movement, the wheel solver via
+	// GetGravityZ) reads world settings; nothing hardcodes -980 twice.
+	if (Biome)
+	{
+		if (AWorldSettings* WorldSettings = GetWorld()->GetWorldSettings())
+		{
+			WorldSettings->bGlobalGravitySet = true;
+			WorldSettings->GlobalGravityZ = Biome->GravityZ;
+		}
+	}
+}
+
+const UExoneerSoilPhysicalMaterial* APlanetEnvironmentManager::GetDefaultSoil() const
+{
+	return Biome ? Biome->DefaultSoil.Get() : nullptr;
 }
 
 float APlanetEnvironmentManager::GetSunFraction() const

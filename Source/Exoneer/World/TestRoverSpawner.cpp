@@ -55,8 +55,8 @@ void ATestRoverSpawner::SpawnRover()
 	UVehicleBlockDefinitionDataAsset* CockpitDef = LoadBlockDef(TEXT("DA_Block_Cockpit"));
 	UVehicleBlockDefinitionDataAsset* BatteryDef = LoadBlockDef(TEXT("DA_Block_Battery"));
 	UVehicleBlockDefinitionDataAsset* SolarDef = LoadBlockDef(TEXT("DA_Block_Solar"));
-	UVehicleBlockDefinitionDataAsset* WheelSteerDef = LoadBlockDef(TEXT("DA_Block_WheelSteer"));
-	UVehicleBlockDefinitionDataAsset* WheelDriveDef = LoadBlockDef(TEXT("DA_Block_WheelDrive"));
+	UVehicleBlockDefinitionDataAsset* WheelSteerDef = LoadBlockDef(TEXT("DA_Block_WheelRoadSteer"));
+	UVehicleBlockDefinitionDataAsset* WheelDriveDef = LoadBlockDef(TEXT("DA_Block_WheelRoadDrive"));
 	UVehicleBlockDefinitionDataAsset* ThrusterDef = LoadBlockDef(TEXT("DA_Block_Thruster"));
 	UVehicleBlockDefinitionDataAsset* GyroDef = LoadBlockDef(TEXT("DA_Block_Gyro"));
 	if (!FrameDef || !CockpitDef || !BatteryDef || !SolarDef || !WheelSteerDef || !WheelDriveDef
@@ -132,6 +132,9 @@ void ATestRoverSpawner::SpawnRover()
 	// Attitude gyro (2x2x2: X 5..6, Y 1..2, Z 1..2) on the mid crossmember.
 	// Must precede the solar pair, which anchors to its cells.
 	Placements.Add({ GyroDef, FIntVector(5, 1, 1), 0.f });
+	// Second gyro (X 7..8): one unit is marginal in yaw on a ~2 t hull, two
+	// give the pilot real authority and let attitude hold actually settle it.
+	Placements.Add({ GyroDef, FIntVector(7, 1, 1), 0.f });
 	Placements.Add({ SolarDef, FIntVector(4, 1, 1), 0.f });
 	Placements.Add({ SolarDef, FIntVector(4, 2, 1), 0.f });
 	Placements.Add({ CockpitDef, FIntVector(11, 1, 1), 0.f });

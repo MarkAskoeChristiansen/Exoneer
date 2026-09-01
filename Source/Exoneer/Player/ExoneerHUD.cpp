@@ -139,7 +139,7 @@ void AExoneerHUD::DrawPilotPanel(const APlayerSurvivalCharacter* Engineer)
 		DrawReadout(X, Y, TEXT("SLIP"), FString::Printf(TEXT("%.0f%%  (best 15-25)"), SmoothedSlip * 100.f), SlipColor);
 		DrawReadout(X, Y, TEXT("SINKAGE"), FString::Printf(TEXT("%.0f cm"), Drivetrain.MaxSinkageM * 100.f),
 			Drivetrain.MaxSinkageM > 0.12f ? VisorWarn : VisorMain);
-		DrawReadout(X, Y, TEXT("TIRES"), FString::Printf(TEXT("%.0f kPa  (G-/H+)"), Drivetrain.MinTirePressureKPa), VisorMain);
+		DrawReadout(X, Y, TEXT("TIRES"), FString::Printf(TEXT("%.0f kPa"), Drivetrain.MinTirePressureKPa), VisorMain);
 		DrawReadout(X, Y, TEXT("CONTACT"), FString::Printf(TEXT("%d/%d wheels"), Drivetrain.WheelsInContact, Drivetrain.WheelCount),
 			Drivetrain.WheelsInContact < Drivetrain.WheelCount ? VisorDim : VisorMain);
 		if (Drivetrain.bParkingBrake)

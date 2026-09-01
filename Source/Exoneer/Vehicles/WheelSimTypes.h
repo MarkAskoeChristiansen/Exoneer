@@ -34,6 +34,8 @@ namespace ExoneerWheelSim
 		float RollingResistRigid = 0.008f;
 		float RollingResistFlexible = 0.015f;
 		float BearingDragNm = 1.5f;
+		/** Fraction of soil shear strength the tread mobilises (grouser effect). */
+		float TreadMobilisation = 0.8f;
 	};
 
 	/** Per-frame commands and tire state (game-thread authored, sample-held over substeps). */

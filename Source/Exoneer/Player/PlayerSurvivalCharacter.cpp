@@ -127,10 +127,7 @@ void APlayerSurvivalCharacter::Tick(float DeltaSeconds)
 			PilotSendAccumulator = 0.f;
 			FPilotInput Packet = PendingPilotInput;
 			Packet.Brake = bBrakeHeld ? 1.f : 0.f;
-			Packet.HeldFlags =
-				(bHandbrakeHeld ? EPilotHeldFlags::Handbrake : 0)
-				| (bTirePressureUpHeld ? EPilotHeldFlags::CtisUp : 0)
-				| (bTirePressureDownHeld ? EPilotHeldFlags::CtisDown : 0);
+			Packet.HeldFlags = bHandbrakeHeld ? EPilotHeldFlags::Handbrake : 0;
 			Packet.ModeToggleCount = ModeTogglePressCounter & 0x3;
 			Server_SendPilotInput(PilotedConstruct, Packet);
 			PendingPilotInput = FPilotInput();
@@ -198,10 +195,6 @@ void APlayerSurvivalCharacter::SetupPlayerInputComponent(UInputComponent* Player
 	Bind(IA_Handbrake,        ETriggerEvent::Started,    &APlayerSurvivalCharacter::Input_HandbrakeStart);
 	Bind(IA_Handbrake,        ETriggerEvent::Completed,  &APlayerSurvivalCharacter::Input_HandbrakeStop);
 	Bind(IA_ToggleControlMode, ETriggerEvent::Started,   &APlayerSurvivalCharacter::Input_ToggleControlMode);
-	Bind(IA_TirePressureUp,   ETriggerEvent::Started,    &APlayerSurvivalCharacter::Input_TirePressureUpStart);
-	Bind(IA_TirePressureUp,   ETriggerEvent::Completed,  &APlayerSurvivalCharacter::Input_TirePressureUpStop);
-	Bind(IA_TirePressureDown, ETriggerEvent::Started,    &APlayerSurvivalCharacter::Input_TirePressureDownStart);
-	Bind(IA_TirePressureDown, ETriggerEvent::Completed,  &APlayerSurvivalCharacter::Input_TirePressureDownStop);
 }
 
 void APlayerSurvivalCharacter::Input_Move(const FInputActionValue& Value)
@@ -216,9 +209,12 @@ void APlayerSurvivalCharacter::Input_Move(const FInputActionValue& Value)
 			PendingPilotInput.Steer = Axis.X;
 			return;
 		}
-		// Flight frame: X forward, Y right; Z comes from jump (thrust up).
+		// Flight: W/S is forward/back thrust, A/D is ROLL through the gyro.
+		// A/D used to command lateral thrust, which does nothing on a craft
+		// with no side-facing thrusters - it felt like the controls were dead.
+		// Roll plus pitch is how you actually steer a thruster craft.
 		PendingPilotInput.Move.X = Axis.Y;
-		PendingPilotInput.Move.Y = Axis.X;
+		PendingPilotInput.Rotate.Z = Axis.X;
 		return;
 	}
 	if (!Controller) return;
@@ -385,10 +381,6 @@ void APlayerSurvivalCharacter::Input_BrakeStart(const FInputActionValue&)   { bB
 void APlayerSurvivalCharacter::Input_BrakeStop(const FInputActionValue&)    { bBrakeHeld = false; }
 void APlayerSurvivalCharacter::Input_HandbrakeStart(const FInputActionValue&) { bHandbrakeHeld = true; }
 void APlayerSurvivalCharacter::Input_HandbrakeStop(const FInputActionValue&)  { bHandbrakeHeld = false; }
-void APlayerSurvivalCharacter::Input_TirePressureUpStart(const FInputActionValue&)   { bTirePressureUpHeld = true; }
-void APlayerSurvivalCharacter::Input_TirePressureUpStop(const FInputActionValue&)    { bTirePressureUpHeld = false; }
-void APlayerSurvivalCharacter::Input_TirePressureDownStart(const FInputActionValue&) { bTirePressureDownHeld = true; }
-void APlayerSurvivalCharacter::Input_TirePressureDownStop(const FInputActionValue&)  { bTirePressureDownHeld = false; }
 
 void APlayerSurvivalCharacter::Input_ToggleControlMode(const FInputActionValue&)
 {

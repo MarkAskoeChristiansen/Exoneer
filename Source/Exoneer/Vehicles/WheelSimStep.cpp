@@ -140,7 +140,13 @@ FWheelSimForce StepWheel(float Dt, const FWheelSimInputItem& Input, const FWheel
 	State.PrevSlipAbs = FMath::Abs(Slip) * SlipActivity;
 
 	// --- Shear forces (one soil budget, friction ellipse emerges). ---
-	const FShearForces Shear = CombinedShearForces(Contact.ContactAreaM2, NormalLoad, Slip, Alpha, Contact.PatchLengthM, Ground.Soil);
+	// Tread mobilisation scales the developed force exactly as it would scale
+	// the shear budget (F = Budget * E(u), and E does not depend on Budget),
+	// so a lugged tire genuinely shears more of the soil's strength.
+	FShearForces Shear = CombinedShearForces(Contact.ContactAreaM2, NormalLoad, Slip, Alpha, Contact.PatchLengthM, Ground.Soil);
+	Shear.LongitudinalN *= Config.TreadMobilisation;
+	Shear.LateralN *= Config.TreadMobilisation;
+	Shear.ResultantN *= Config.TreadMobilisation;
 
 	// --- Motion resistance: compaction + bulldozing, tapered at rest so a parked rover never creeps. ---
 	const float Compaction = CompactionResistance(Config.WidthM, Contact.SinkageM, Ground.Soil, State.PrevSlipAbs);
@@ -164,7 +170,7 @@ FWheelSimForce StepWheel(float Dt, const FWheelSimInputItem& Input, const FWheel
 	const float ContactSpeed = FMath::Sqrt(LongitudinalSpeed * LongitudinalSpeed + LateralSpeed * LateralSpeed);
 	if (BrakeTorqueMax > 1.f && ContactSpeed < 0.05f && FMath::Abs(State.OmegaRadS * EffectiveRadius) < 0.05f)
 	{
-		const float HoldCap = FMath::Min(ShearBudget(Contact.ContactAreaM2, NormalLoad, Ground.Soil), BrakeTorqueMax / EffectiveRadius);
+		const float HoldCap = FMath::Min(ShearBudget(Contact.ContactAreaM2, NormalLoad, Ground.Soil) * Config.TreadMobilisation, BrakeTorqueMax / EffectiveRadius);
 		const float HoldMagnitude = FMath::Min(ContactSpeed / 0.05f, 1.f) * HoldCap;
 		if (ContactSpeed > 1e-4f)
 		{

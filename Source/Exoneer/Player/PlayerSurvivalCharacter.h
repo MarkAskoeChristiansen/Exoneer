@@ -90,8 +90,6 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Input") UInputAction* IA_Brake = nullptr;
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Input") UInputAction* IA_Handbrake = nullptr;
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Input") UInputAction* IA_ToggleControlMode = nullptr;
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Input") UInputAction* IA_TirePressureUp = nullptr;
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Input") UInputAction* IA_TirePressureDown = nullptr;
 
 	// --- Tunables ---
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Movement") float WalkSpeed = 450.f;
@@ -169,10 +167,6 @@ protected:
 	void Input_HandbrakeStart(const struct FInputActionValue& Value);
 	void Input_HandbrakeStop(const struct FInputActionValue& Value);
 	void Input_ToggleControlMode(const struct FInputActionValue& Value);
-	void Input_TirePressureUpStart(const struct FInputActionValue& Value);
-	void Input_TirePressureUpStop(const struct FInputActionValue& Value);
-	void Input_TirePressureDownStart(const struct FInputActionValue& Value);
-	void Input_TirePressureDownStop(const struct FInputActionValue& Value);
 
 	// --- Piloting (client intent -> server; the construct is not connection-owned) ---
 
@@ -195,8 +189,6 @@ protected:
 	/** Held key states, sampled into the packet at send time (never zeroed by sends). */
 	bool bBrakeHeld = false;
 	bool bHandbrakeHeld = false;
-	bool bTirePressureUpHeld = false;
-	bool bTirePressureDownHeld = false;
 
 	/** Rolling 2-bit counter of control-mode toggle presses. */
 	uint8 ModeTogglePressCounter = 0;

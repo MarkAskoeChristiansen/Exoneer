@@ -32,7 +32,6 @@ public:
 	bool bParkingBrake = true;
 	float TargetSteerAngleRad = 0.f;    // Ackermann-resolved by the construct
 	float TargetSlipCap = 1.f;          // Shear Control talent lever
-	int32 CtisPumpDirection = 0;        // -1 deflate / 0 hold / +1 inflate (hold-to-pump keys)
 
 	// --- Persistent settings (save/load) ---
 	void RestorePersistentState(float InTirePressureKPa, float InSteerTrimDeg);

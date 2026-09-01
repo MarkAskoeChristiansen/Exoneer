@@ -22,8 +22,6 @@ namespace EPilotHeldFlags
 	enum Type : uint8
 	{
 		Handbrake = 1 << 0,
-		CtisUp    = 1 << 1,  // hold-to-pump tire pressure up (H)
-		CtisDown  = 1 << 2,  // hold-to-pump tire pressure down (G)
 	};
 }
 

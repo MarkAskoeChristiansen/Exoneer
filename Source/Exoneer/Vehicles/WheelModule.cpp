@@ -90,14 +90,6 @@ void UWheelModule::TickModule(float DeltaSeconds)
 		return;
 	}
 
-	// CTIS valve: a physical pump rate, not a set-instantly value.
-	if (CtisPumpDirection != 0)
-	{
-		TirePressureKPa = FMath::Clamp(
-			TirePressureKPa + (float)CtisPumpDirection * Spec->CtisRateKPaPerS * DeltaSeconds,
-			Spec->MinTirePressureKPa, Spec->MaxTirePressureKPa);
-	}
-
 	// Steering servo: slew toward the Ackermann target at the authored rate.
 	const float MaxSteer = FMath::DegreesToRadians(Spec->MaxSteerAngleDeg);
 	const float SteerTarget = FMath::Clamp(TargetSteerAngleRad + SteerTrimRad, -MaxSteer, MaxSteer);
@@ -224,6 +216,7 @@ bool UWheelModule::BuildSimInput(ExoneerWheelSim::FWheelSimInputItem& OutItem) c
 	Config.RollingResistRigid = Spec->RollingResistRigid;
 	Config.RollingResistFlexible = Spec->RollingResistFlexible;
 	Config.BearingDragNm = Spec->BearingDragNm;
+	Config.TreadMobilisation = Spec->TreadMobilisation;
 
 	ExoneerWheelSim::FWheelSimCommand& Command = OutItem.Command;
 	Command.Throttle = ThrottleCommand;

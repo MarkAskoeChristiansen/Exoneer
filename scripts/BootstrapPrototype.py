@@ -113,7 +113,6 @@ action_specs = {
     # Piloting extras (wheel pass): service brake, handbrake, Flight/Ground
     # mode toggle, CTIS hold-to-pump tire pressure.
     "IA_Brake": BOOL, "IA_Handbrake": BOOL, "IA_ToggleControlMode": BOOL,
-    "IA_TirePressureUp": BOOL, "IA_TirePressureDown": BOOL,
 }
 actions = {}
 for name, value_type in action_specs.items():
@@ -149,8 +148,6 @@ BINDINGS = [
     ("IA_Brake", "Z", []),
     ("IA_Handbrake", "LeftControl", []),
     ("IA_ToggleControlMode", "V", []),
-    ("IA_TirePressureUp", "H", []),
-    ("IA_TirePressureDown", "G", []),
 ]
 
 # UE 5.8 moved the runtime mappings into DefaultKeyMappings; the legacy
@@ -359,23 +356,23 @@ def module_class(name):
 
 frame_stage = [make_stage([make_entry(items["iron_ingot"], 1)], 1.5)]
 blocks = {}
-blocks["frame"] = ensure_block("DA_Block_Frame", "frame_1x1", "Frame Block", CUBE, frame_stage, mass=40)
+blocks["frame"] = ensure_block("DA_Block_Frame", "frame_1x1", "Frame Block", CUBE, frame_stage, mass=14)
 blocks["cockpit"] = ensure_block(
     "DA_Block_Cockpit", "cockpit", "Cockpit", CUBE,
     [make_stage([make_entry(items["plate"], 2), make_entry(items["computer_board"], 1)], 3.0)],
-    module=module_class("CockpitModule"), mass=120, health=300, power=-20.0)
+    module=module_class("CockpitModule"), mass=85, health=300, power=-20.0)
 blocks["thruster"] = ensure_block(
     "DA_Block_Thruster", "thruster_small", "Small Thruster", CYLINDER,
     [make_stage([make_entry(items["plate"], 1), make_entry(items["motor"], 1)], 2.5)],
-    module=module_class("ThrusterModule"), mass=60, health=200, power=-600.0, thrust=9000.0)
+    module=module_class("ThrusterModule"), mass=45, health=200, power=-12000.0, thrust=4000.0)
 blocks["battery"] = ensure_block(
     "DA_Block_Battery", "battery_small", "Small Battery", CUBE,
     [make_stage([make_entry(items["plate"], 1), make_entry(items["computer_board"], 1)], 2.0)],
-    module=module_class("BatteryModule"), mass=80, health=200, storage=900000.0)
+    module=module_class("BatteryModule"), mass=50, health=200, storage=900000.0)
 blocks["solar"] = ensure_block(
     "DA_Block_Solar", "solar_small", "Solar Collector", CUBE,
     [make_stage([make_entry(items["silicon_wafer"], 1), make_entry(items["plate"], 1)], 2.0)],
-    module=module_class("SolarModule"), mass=30, health=120, power=1200.0)
+    module=module_class("SolarModule"), mass=18, health=120, power=1200.0)
 
 # Attitude gyro: a 50 cm reaction-wheel triad (2x2x2 cells). 2000 N*m on a
 # ~3 t rover is roughly 0.6-0.7 rad/s^2 in yaw and enough to right a hop -
@@ -389,15 +386,45 @@ blocks["gyro"] = ensure_block(
     size_in_cells=(2, 2, 2),
     extra={"max_gyro_torque_nm": 2000.0})
 
-# Wheels: 3x1x3 cells (75 cm block housing a 70 cm tire with bulge clearance).
-# Terramechanics constants ride the C++ FVehicleWheelSpec defaults - only the
-# per-block differences are authored here. The Z-aligned engine cylinder is
-# rolled 90 deg so it spins about the block's Y axle. PowerDelta is the rated
-# electrical wattage of the hub motor (the ledger's demand ceiling comes from
-# physics, not from this number).
-def make_wheel_spec(steerable):
+# Wheels: 3x1x3 cells (75 cm block housing a ~70-84 cm tire with clearance).
+# FOUR TERRAIN FAMILIES, distinguished only by real physical variables - width,
+# operating pressure and how much of the soil's shear strength the tread can
+# mobilise. Wong's critical ground pressure on the authored soils is roughly
+# 65-130 kPa at rover wheel loads, so a 220 kPa road tire is RIGID everywhere
+# (it digs) while a 45 kPa balloon tire is FLEXIBLE (it floats). That threshold
+# is the whole reason terrain-specific wheels matter; nothing here is a bonus.
+#
+# (radius m, width m, pressure kPa, tread mobilisation, mass kg)
+#   road    narrow + hard   : cheap starter, good on the slab, digs in soft soil
+#   sand    very wide + soft: flotation on dune sand, smooth tread
+#   mud     lugged          : lugs shear soil against soil, so >1 - grips clay/mud
+#   snow    widest + softest: maximum flotation on low-cohesion snow
+wheel_families = [
+    ("Road",  "road",  "Road Wheel",       0.35, 0.18, 220.0, 0.70, 60),
+    ("Sand",  "sand",  "Sand Balloon Wheel", 0.40, 0.40, 45.0, 0.75, 75),
+    ("Mud",   "mud",   "Lugged Mud Wheel",  0.38, 0.24, 120.0, 1.15, 85),
+    ("Snow",  "snow",  "Snow Flotation Wheel", 0.42, 0.50, 30.0, 0.95, 95),
+]
+
+# UE pythonizes runs of capitals inconsistently ("KPa" can become "k_pa" or
+# "kpa"), so try the plausible spellings and fail loudly rather than silently
+# leaving an authored value at its C++ default.
+def set_prop_any(target, names, value):
+    for name in names:
+        try:
+            target.set_editor_property(name, value)
+            return name
+        except Exception:
+            continue
+    raise RuntimeError("None of %s exist on %s" % (names, target))
+
+def make_wheel_spec(steerable, radius, width, pressure, tread):
     spec = unreal.VehicleWheelSpec()
     spec.set_editor_property("steerable", steerable)
+    spec.set_editor_property("radius_m", radius)
+    spec.set_editor_property("width_m", width)
+    set_prop_any(spec, ["nominal_tire_pressure_k_pa", "nominal_tire_pressure_kpa"], pressure)
+    spec.set_editor_property("tread_mobilisation", tread)
     return spec
 
 def make_wheel_mesh_transform():
@@ -408,26 +435,21 @@ def make_wheel_mesh_transform():
     return transform
 
 wheel_stage = [make_stage([make_entry(items["tire"], 1), make_entry(items["motor"], 1), make_entry(items["plate"], 1)], 3.5)]
-blocks["wheel_steer"] = ensure_block(
-    "DA_Block_WheelSteer", "wheel_steer", "Steering Wheel Assembly", CYLINDER,
-    wheel_stage, module=module_class("WheelModule"), mass=90, health=250, power=-4000.0,
-    size_in_cells=(3, 1, 3),
-    extra={
-        "is_wheel": True,
-        "wheel_spec": make_wheel_spec(True),
-        "allow_terrain_overlap_on_place": True,
-        "mesh_relative_transform": make_wheel_mesh_transform(),
-    })
-blocks["wheel_drive"] = ensure_block(
-    "DA_Block_WheelDrive", "wheel_drive", "Drive Wheel Assembly", CYLINDER,
-    wheel_stage, module=module_class("WheelModule"), mass=90, health=250, power=-4000.0,
-    size_in_cells=(3, 1, 3),
-    extra={
-        "is_wheel": True,
-        "wheel_spec": make_wheel_spec(False),
-        "allow_terrain_overlap_on_place": True,
-        "mesh_relative_transform": make_wheel_mesh_transform(),
-    })
+for suffix, ident, display, radius, width, pressure, tread, mass in wheel_families:
+    for steerable, role in ((True, "Steer"), (False, "Drive")):
+        key = "wheel_%s_%s" % (ident, role.lower())
+        blocks[key] = ensure_block(
+            "DA_Block_Wheel%s%s" % (suffix, role), "wheel_%s_%s" % (ident, role.lower()),
+            "%s (%s)" % (display, role), CYLINDER,
+            wheel_stage, module=module_class("WheelModule"),
+            mass=mass, health=250, power=-4000.0,
+            size_in_cells=(3, 1, 3),
+            extra={
+                "is_wheel": True,
+                "wheel_spec": make_wheel_spec(steerable, radius, width, pressure, tread),
+                "allow_terrain_overlap_on_place": True,
+                "mesh_relative_transform": make_wheel_mesh_transform(),
+            })
 
 # ---------------------------------------------------------------------------
 # 5. Recipes
@@ -580,7 +602,10 @@ char_cdo.set_editor_property("quick_bar", [
     pieces["fabricator"], pieces["oxygen_generator"],
     blocks["frame"], blocks["cockpit"], blocks["thruster"], blocks["gyro"],
     blocks["battery"], blocks["solar"],
-    blocks["wheel_steer"], blocks["wheel_drive"],
+    blocks["wheel_road_steer"], blocks["wheel_road_drive"],
+    blocks["wheel_sand_steer"], blocks["wheel_sand_drive"],
+    blocks["wheel_mud_steer"], blocks["wheel_mud_drive"],
+    blocks["wheel_snow_steer"], blocks["wheel_snow_drive"],
 ])
 char_cdo.set_editor_property("starter_items", [
     make_entry(items["iron_ingot"], 40),

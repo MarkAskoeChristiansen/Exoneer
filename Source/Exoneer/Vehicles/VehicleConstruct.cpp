@@ -995,11 +995,22 @@ void AVehicleConstruct::ExitPilot_Implementation(APawn* Pilot)
 			{
 				Movement->SetMovementMode(MOVE_Falling);
 			}
+			// Step clear along WORLD up, not the construct's Z: a rover on its
+			// roof has its local Z pointing into the ground, which teleported
+			// the engineer INTO the floor. Also clear sideways from the hull so
+			// a flipped or half-buried vehicle does not eject the pilot inside
+			// its own blocks.
 			const float ClearHeight = AsCharacter->GetCapsuleComponent()
 				? AsCharacter->GetCapsuleComponent()->GetScaledCapsuleHalfHeight() + CellSize
 				: 100.f;
+			FVector LateralOut = AsCharacter->GetActorLocation() - GetActorLocation();
+			LateralOut.Z = 0.f;
+			if (!LateralOut.Normalize(1e-3f))
+			{
+				LateralOut = GetActorForwardVector().GetSafeNormal2D();
+			}
 			AsCharacter->SetActorLocation(
-				AsCharacter->GetActorLocation() + GetActorQuat().GetAxisZ() * ClearHeight,
+				AsCharacter->GetActorLocation() + FVector::UpVector * ClearHeight + LateralOut * CellSize * 2.f,
 				false, nullptr, ETeleportType::TeleportPhysics);
 		}
 		if (APlayerSurvivalCharacter* Character = Cast<APlayerSurvivalCharacter>(Leaving))
@@ -1433,6 +1444,9 @@ void AVehicleConstruct::ServerRouteThrust(float DeltaSeconds)
 		if (UGyroModule* Gyro = Cast<UGyroModule>(Pair.Value.Get()))
 		{
 			Gyro->CommandWorld = GyroCommandWorld;
+			// Hold attitude only with a pilot aboard: an abandoned craft
+			// should not burn power steadying itself forever.
+			Gyro->bAttitudeHoldEnabled = PilotPawn != nullptr;
 			continue;
 		}
 		UThrusterModule* Thruster = Cast<UThrusterModule>(Pair.Value.Get());
@@ -1489,10 +1503,6 @@ void AVehicleConstruct::ServerRouteDrive(float DeltaSeconds)
 	CurrentDriveThrottle += FMath::Clamp(ThrottleTarget - CurrentDriveThrottle,
 		-RampRate * DeltaSeconds, RampRate * DeltaSeconds);
 	const float ThrottleCmd = CurrentDriveThrottle;
-	// CTIS hold-to-pump (H up / G down): a physical valve rate in the module.
-	const int32 CtisDir = bGround && PilotPawn
-		? ((PilotInput.HeldFlags & EPilotHeldFlags::CtisUp) ? 1 : 0) - ((PilotInput.HeldFlags & EPilotHeldFlags::CtisDown) ? 1 : 0)
-		: 0;
 
 	// Ackermann reference frame: the active cockpit's local frame (actor axes
 	// without one, e.g. before the first seating).
@@ -1510,6 +1520,7 @@ void AVehicleConstruct::ServerRouteDrive(float DeltaSeconds)
 		const FVehicleWheelSpec* Spec = nullptr;
 		float Longitudinal = 0.f;   // m, along cockpit forward
 		float Lateral = 0.f;        // m, along cockpit right
+		float DesiredSteer = 0.f;   // rad, before the shared limit scale
 	};
 	TArray<FWheelEntry, TInlineAllocator<12>> Wheels;
 	float NonSteerableSum = 0.f;
@@ -1564,6 +1575,48 @@ void AVehicleConstruct::ServerRouteDrive(float DeltaSeconds)
 		? FMath::Max(SteerableWheelbaseSum / SteerableCount, 0.3f)
 		: 0.3f;
 
+	// Resolve Ackermann angles first, then scale the whole set to the limit.
+	// Clamping each wheel independently (the old behaviour) broke the shared
+	// turn centre at full lock: the inner wheel always wants more angle than
+	// the outer, so it hit the clamp while the outer did not, and the two
+	// wheels stopped pointing at the same centre - they fought each other and
+	// scrubbed. Scaling preserves the geometry and just widens the turn.
+	float LargestDemand = 0.f;
+	float SteerLimit = TNumericLimits<float>::Max();
+	for (FWheelEntry& Entry : Wheels)
+	{
+		const FVehicleWheelSpec& Spec = *Entry.Spec;
+		if (!Spec.bSteerable)
+		{
+			Entry.DesiredSteer = 0.f;
+			continue;
+		}
+		const float MaxSteer = FMath::DegreesToRadians(Spec.MaxSteerAngleDeg);
+		SteerLimit = FMath::Min(SteerLimit, MaxSteer);
+		const float MeanAngle = SteerCmd * MaxSteer;
+		const float Wheelbase = FMath::Max(Entry.Longitudinal - RearAxle, 0.f);
+		if (FMath::Abs(MeanAngle) < 0.017f || Wheelbase < 0.05f)
+		{
+			Entry.DesiredSteer = MeanAngle;
+		}
+		else
+		{
+			// True Ackermann from the layout: one turn center on the rear-axle
+			// line; each steered wheel aims tangentially at it, so the inner
+			// wheel steers tighter. Positive steer = right.
+			const float Side = MeanAngle > 0.f ? 1.f : -1.f;
+			const float CenterLateral = Side * MeanWheelbase / FMath::Tan(FMath::Abs(MeanAngle));
+			const float Denominator = CenterLateral - Entry.Lateral;
+			Entry.DesiredSteer = FMath::Abs(Denominator) < 0.1f
+				? Side * MaxSteer
+				: FMath::Atan(Wheelbase / Denominator);
+		}
+		LargestDemand = FMath::Max(LargestDemand, FMath::Abs(Entry.DesiredSteer));
+	}
+	const float SteerScale = (LargestDemand > SteerLimit && LargestDemand > KINDA_SMALL_NUMBER)
+		? SteerLimit / LargestDemand
+		: 1.f;
+
 	for (FWheelEntry& Entry : Wheels)
 	{
 		UWheelModule* Wheel = Entry.Module;
@@ -1571,34 +1624,8 @@ void AVehicleConstruct::ServerRouteDrive(float DeltaSeconds)
 		Wheel->ThrottleCommand = Spec.bDriven ? ThrottleCmd : 0.f;
 		Wheel->BrakeCommand = BrakeCmd;
 		Wheel->bParkingBrake = bParkingBrakeEngaged;
-		Wheel->CtisPumpDirection = CtisDir;
 		Wheel->TargetSlipCap = StockSlipCap;   // Shear Control talent lowers this to ~0.3 when talents land.
-
-		float TargetSteer = 0.f;
-		if (Spec.bSteerable)
-		{
-			const float MaxSteer = FMath::DegreesToRadians(Spec.MaxSteerAngleDeg);
-			const float MeanAngle = SteerCmd * MaxSteer;
-			const float Wheelbase = FMath::Max(Entry.Longitudinal - RearAxle, 0.f);
-			if (FMath::Abs(MeanAngle) < 0.017f || Wheelbase < 0.05f)
-			{
-				TargetSteer = MeanAngle;
-			}
-			else
-			{
-				// True Ackermann from the layout: one turn center on the
-				// rear-axle line; each steered wheel aims tangentially at it,
-				// so the inner wheel steers tighter. Positive steer = right.
-				const float Side = MeanAngle > 0.f ? 1.f : -1.f;
-				const float CenterLateral = Side * MeanWheelbase / FMath::Tan(FMath::Abs(MeanAngle));
-				const float Denominator = CenterLateral - Entry.Lateral;
-				TargetSteer = FMath::Abs(Denominator) < 0.1f
-					? Side * MaxSteer
-					: FMath::Atan(Wheelbase / Denominator);
-			}
-			TargetSteer = FMath::Clamp(TargetSteer, -MaxSteer, MaxSteer);
-		}
-		Wheel->TargetSteerAngleRad = TargetSteer;
+		Wheel->TargetSteerAngleRad = Entry.DesiredSteer * SteerScale;
 	}
 }
 

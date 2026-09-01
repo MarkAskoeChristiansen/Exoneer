@@ -134,6 +134,15 @@ void UGyroModule::TickModule(float DeltaSeconds)
 	// Commanded torque, capped at the rating.
 	FVector CommandTorqueWorld = CommandWorld.GetClampedToMaxSize(1.f) * RatedTorqueNm;
 
+	// Attitude hold: with no pilot rotation command, null the residual body
+	// rate. This is what makes a thruster craft flyable at all - an
+	// uncontrolled rigid body keeps whatever tumble the last asymmetric
+	// force gave it, and the pilot has no way to stop it.
+	if (bAttitudeHoldEnabled && CommandWorld.IsNearlyZero() && !AngularVelocity.IsNearlyZero())
+	{
+		CommandTorqueWorld = (-AngularVelocity * AttitudeHoldGain * RatedTorqueNm).GetClampedToMaxSize(RatedTorqueNm);
+	}
+
 	// Saturation: a rotor already at its speed limit cannot absorb more
 	// momentum in that direction, so cancel the component of the command
 	// that would wind it further. The opposite direction still works, which

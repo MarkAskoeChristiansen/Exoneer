@@ -137,6 +137,15 @@ public:
 	/** SERVER. Desired torque direction in world space, magnitude 0..1. Set by the construct's input router each tick. */
 	FVector CommandWorld = FVector::ZeroVector;
 
+	/**
+	 * SERVER. True while a pilot is seated: the triad then holds attitude
+	 * (damps residual body rates) whenever the pilot is not commanding a
+	 * rotation. Real spacecraft and ship stabilisers do exactly this, and
+	 * without it a thruster craft tumbles from the first asymmetric nudge and
+	 * cannot be flown.
+	 */
+	bool bAttitudeHoldEnabled = false;
+
 	/** Rated torque per axis (N*m), resolved from the block definition at Initialize. */
 	float RatedTorqueNm = 0.f;
 
@@ -148,6 +157,13 @@ private:
 
 	/** Seconds of full-rating torque the rotors can absorb before saturating. */
 	float SaturationSeconds = 5.f;
+
+	/**
+	 * Attitude-hold gain: commanded torque = -Gain * I_est * body rate,
+	 * expressed as "fraction of rating per rad/s". 1.0 means a 1 rad/s
+	 * residual rate asks for full rated torque to null it.
+	 */
+	float AttitudeHoldGain = 2.f;
 
 	/** Last commanded torque magnitude as a fraction of rating, for the power draw. */
 	float LastCommandFraction = 0.f;

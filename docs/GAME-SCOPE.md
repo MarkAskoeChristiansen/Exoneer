@@ -238,11 +238,15 @@ replicated foundation this scope builds on. Status per module:
 | 1. Suit & life support | Suit power/O2/temperature replicated; **Nutrition stat still exists** | Remove Nutrition (scope bans hunger); umbilical recharge; haptic mass/friction movement; fabricator tool modes |
 | 2. Structural building | Socket snapping, support-budget solver, ghost-then-weld, tiers, storm damage | Replace budget solver with vector load solver + sag/warp visuals; free-placement layer; wiring/piping networks |
 | 3. Atmosphere & fluids | Oxygen generator machine only | Pressure volumes, airlocks, decompression forces, pipe flow simulation |
-| 4. Vehicles | Unified 25 cm grid, welded rigid body, emergent CoM/mass, thrusters, split detection | Drivetrain (motors/gearbox/shafts/suspension), wheels with Bekker-Wong terramechanics, tire pressure/deflection |
+| 4. Vehicles | Unified 25 cm grid, welded rigid body, emergent CoM/mass, thrusters, split detection; wheels with Bekker-Wong terramechanics per fixed physics substep (dual rigid/pneumatic regime, slip sinkage, Janosi-Hanamoto combined shear, compaction + bulldozing resistance, hub motors with copper loss, CTIS tire pressure, Ackermann steering) | Gearboxes/drive shafts/differentials as physical parts, tire wear/puncture, deformable tire meshes, persistent ruts, multi-pass sinkage |
 | 5. Industry & maintenance | Refine/fabricate machines with power-scaled crafting | Heat footprints/cooling, mechanical wear, part-swap repair (**current weld-to-repair is a placeholder that violates the no-healing-beam rule and must be replaced by part replacement**) |
 | 6. Environment & weather | Replicated day/night + storms with per-tier structure damage | Volumetric storm fronts with drag forces, corrosion, telemetry/signal system, PCG world |
 | 7. Talents | Not started | Talent tree data model + the physical-calibration hooks per path (no stat boosts) |
 | 8. Diegetic UI | Not started (HUD events exposed as delegates) | Visor/wrist/dashboard instrument stack; delete any screen-space bars as this lands |
 
-Two known conflicts to resolve as their systems come up (flagged, not silently
-changed): the `Nutrition` survival stat and the weld-to-repair placeholder.
+Known conflicts to resolve as their systems come up (flagged, not silently
+changed): the weld-to-repair placeholder, and the CTIS tire-pressure valve
+being available to everyone with a full 20-300 kPa range - section 7 gates
+extreme decompression behind Heavy Off-Road Level 1, so when talents land the
+ungated minimum must rise to a debead floor (~60 kPa) with the talent
+unlocking the low band. (The `Nutrition` stat was removed as scoped.)

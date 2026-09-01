@@ -154,6 +154,10 @@ UExoneerSaveGame* USaveGameSubsystem::GatherWorldState() const
 			Rec.Phase = static_cast<uint8>(Block.Phase);
 			Rec.Health = Block.Health;
 			Rec.StateScalar = Block.StateScalar;
+			if (Block.Def->bIsWheel)
+			{
+				It->GetWheelPersistentState(Block.BlockInstanceId, Rec.TirePressureKPa, Rec.SteerTrimDeg);
+			}
 			Vehicle.Blocks.Add(Rec);
 		}
 		if (Vehicle.Blocks.Num() > 0)
@@ -446,7 +450,23 @@ void USaveGameSubsystem::ApplyVehicles(UWorld* World, const UExoneerSaveGame* Sa
 	{
 		if (SavedVehicle.Blocks.Num() == 0) continue;
 
-		const FSavedVehicleBlock& First = SavedVehicle.Blocks[0];
+		// Structural-first founding: the build tool refuses to found a
+		// construct on a module block, and the save path must match - a wheel
+		// as the founding record would sidestep that rule after the original
+		// founder was deconstructed. Fall back to Blocks[0] if every block is
+		// a module block.
+		int32 FoundingIndex = 0;
+		for (int32 Index = 0; Index < SavedVehicle.Blocks.Num(); ++Index)
+		{
+			UVehicleBlockDefinitionDataAsset* CandidateDef = ResolveVehicleBlockDef(SavedVehicle.Blocks[Index].BlockId);
+			if (CandidateDef && !CandidateDef->ModuleClass)
+			{
+				FoundingIndex = Index;
+				break;
+			}
+		}
+
+		const FSavedVehicleBlock& First = SavedVehicle.Blocks[FoundingIndex];
 		UVehicleBlockDefinitionDataAsset* FirstDef = ResolveVehicleBlockDef(First.BlockId);
 		if (!FirstDef)
 		{
@@ -471,16 +491,24 @@ void USaveGameSubsystem::ApplyVehicles(UWorld* World, const UExoneerSaveGame* Sa
 			continue;
 		}
 
+		// Byte-exact geometry restoration: a rover saved with wheels sunk in
+		// soft soil must not lose those blocks to the world-overlap rejection.
+		// The suspension settles the body on the first simulated frame.
+		Construct->bSuppressWorldOverlapCheck = true;
+
 		TArray<int32> PlacedIds;
 		PlacedIds.Init(INDEX_NONE, SavedVehicle.Blocks.Num());
-		PlacedIds[0] = Construct->GetBlocks()[0].BlockInstanceId;
+		PlacedIds[FoundingIndex] = Construct->GetBlocks()[0].BlockInstanceId;
 
 		// Multi-pass placement: PlaceBlockGhost enforces face adjacency, and
 		// the saved order does not guarantee it, so retry until stable.
 		TArray<int32> PendingIdx;
-		for (int32 Index = 1; Index < SavedVehicle.Blocks.Num(); ++Index)
+		for (int32 Index = 0; Index < SavedVehicle.Blocks.Num(); ++Index)
 		{
-			PendingIdx.Add(Index);
+			if (Index != FoundingIndex)
+			{
+				PendingIdx.Add(Index);
+			}
 		}
 		bool bProgress = true;
 		while (PendingIdx.Num() > 0 && bProgress)
@@ -518,9 +546,17 @@ void USaveGameSubsystem::ApplyVehicles(UWorld* World, const UExoneerSaveGame* Sa
 		{
 			if (PlacedIds[Index] != INDEX_NONE)
 			{
-				RestoreVehicleBlockRecord(Construct, PlacedIds[Index], SavedVehicle.Blocks[Index], /*bRestoreOrientation*/ false);
+				const FSavedVehicleBlock& Saved = SavedVehicle.Blocks[Index];
+				RestoreVehicleBlockRecord(Construct, PlacedIds[Index], Saved, /*bRestoreOrientation*/ false);
+				// Wheel persistent settings park on the construct until the
+				// module spawns (modules are created later by the sync tick).
+				if (Saved.TirePressureKPa > 0.f || Saved.SteerTrimDeg != 0.f)
+				{
+					Construct->QueueWheelStateRestore(PlacedIds[Index], Saved.TirePressureKPa, Saved.SteerTrimDeg);
+				}
 			}
 		}
+		Construct->bSuppressWorldOverlapCheck = false;
 		Construct->MarkVisualsDirty();
 	}
 }

@@ -53,10 +53,15 @@ struct FVehicleWheelSpec
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Steer") float SteerRateDegPerS = 90.f;
 
 	// --- Tire (ground pressure model: p = inflation + carcass; CTIS moves inflation only) ---
+	// Retuned so the CTIS band straddles Wong's p_gcr at rover loads (~66-130
+	// kPa on the authored soils): at 180 kPa the tire is rigid everywhere; at
+	// 20 kPa it floats flexible on both sand and clay. The scope gates extreme
+	// decompression behind the Heavy Off-Road talent; ungated for now and
+	// flagged in GAME-SCOPE section 9.
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Tire") float NominalTirePressureKPa = 180.f;
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Tire") float MinTirePressureKPa = 60.f;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Tire") float MinTirePressureKPa = 20.f;
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Tire") float MaxTirePressureKPa = 300.f;
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Tire") float CarcassStiffnessKPa = 35.f;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Tire") float CarcassStiffnessKPa = 15.f;
 	/** Physical valve rate for the CTIS hold-to-pump keys. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Tire") float CtisRateKPaPerS = 20.f;
 

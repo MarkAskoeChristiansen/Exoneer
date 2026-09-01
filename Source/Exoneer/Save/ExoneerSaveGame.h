@@ -63,6 +63,11 @@ struct FSavedVehicleBlock
 	UPROPERTY() uint8 Phase = 0;
 	UPROPERTY() float Health = 0.f;
 	UPROPERTY() float StateScalar = 0.f;
+
+	// Wheel persistent settings. Tagged-property serialization loads old saves
+	// with these at defaults (0 = "use the authored nominal") - default-safe.
+	UPROPERTY() float TirePressureKPa = 0.f;
+	UPROPERTY() float SteerTrimDeg = 0.f;
 };
 
 /** One vehicle construct: its root transform and block records. */

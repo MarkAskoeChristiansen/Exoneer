@@ -1195,6 +1195,25 @@ bool AVehicleConstruct::TakeSavedWheelState(int32 BlockInstanceId, FWheelSavedSt
 	return false;
 }
 
+bool AVehicleConstruct::GetWheelPersistentState(int32 BlockInstanceId, float& OutTirePressureKPa, float& OutSteerTrimDeg) const
+{
+	if (const UWheelModule* Wheel = Cast<UWheelModule>(Modules.FindRef(BlockInstanceId)))
+	{
+		OutTirePressureKPa = Wheel->GetTirePressureKPa();
+		OutSteerTrimDeg = Wheel->GetSteerTrimDeg();
+		return true;
+	}
+	// Not Complete yet (ghost/under construction): keep any still-queued
+	// restore values so an unfinished save-load round trip stays lossless.
+	if (const FWheelSavedState* Pending = PendingWheelRestore.Find(BlockInstanceId))
+	{
+		OutTirePressureKPa = Pending->TirePressureKPa;
+		OutSteerTrimDeg = Pending->SteerTrimDeg;
+		return true;
+	}
+	return false;
+}
+
 // --- Server internals ---
 
 void AVehicleConstruct::SyncModulesToRecords()

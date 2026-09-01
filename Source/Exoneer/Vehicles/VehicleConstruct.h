@@ -215,6 +215,9 @@ public:
 	/** SERVER. Consume-and-remove queued settings for a block. False if none pending. */
 	bool TakeSavedWheelState(int32 BlockInstanceId, FWheelSavedState& OutState);
 
+	/** SERVER. Read a live wheel module's persistent settings for the save path. False if not a live wheel. */
+	bool GetWheelPersistentState(int32 BlockInstanceId, float& OutTirePressureKPa, float& OutSteerTrimDeg) const;
+
 	UPROPERTY(BlueprintAssignable) FOnVehicleBlocksChanged OnBlocksChanged;
 
 	// --- SERVER grid API (called from build tool RPCs and modules) ---

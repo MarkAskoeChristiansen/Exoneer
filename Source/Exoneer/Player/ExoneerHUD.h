@@ -29,8 +29,13 @@ protected:
 	float SmoothedSuitDrain = 0.f;
 	float LastSuitPower = -1.f;
 
+	/** Smoothed pilot readouts (sampled in Tick, rendered in DrawHUD). */
+	float SmoothedSpeedMS = 0.f;
+	float SmoothedSlip = 0.f;
+
 	void DrawCrosshair();
 	void DrawVitals(const APlayerSurvivalCharacter* Engineer);
+	void DrawPilotPanel(const APlayerSurvivalCharacter* Engineer);
 	void DrawToolPanel(APlayerSurvivalCharacter* Engineer);
 	void DrawInteractionPrompt(const APlayerSurvivalCharacter* Engineer);
 	void DrawInventory(const APlayerSurvivalCharacter* Engineer);

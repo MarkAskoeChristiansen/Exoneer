@@ -9,6 +9,7 @@
 #include "Data/ItemDefinitionDataAsset.h"
 #include "Data/PieceDefinitionDataAsset.h"
 #include "Data/VehicleBlockDefinitionDataAsset.h"
+#include "Vehicles/VehicleConstruct.h"
 #include "Machines/MachinePiece.h"
 #include "Interfaces/Interactable.h"
 #include "Engine/Canvas.h"
@@ -51,6 +52,20 @@ void AExoneerHUD::Tick(float DeltaSeconds)
 		}
 		LastSuitPower = Power;
 	}
+
+	// Smooth the pilot readouts here, not in DrawHUD - same pattern as the
+	// suit drain, and exactly how a bouncing analog needle will behave later.
+	if (Engineer && Engineer->PilotedConstruct && DeltaSeconds > 0.f)
+	{
+		const FVehicleDrivetrainSummary Drivetrain = Engineer->PilotedConstruct->GetDrivetrainSummary();
+		SmoothedSpeedMS = FMath::FInterpTo(SmoothedSpeedMS, Drivetrain.SpeedMS, DeltaSeconds, 4.f);
+		SmoothedSlip = FMath::FInterpTo(SmoothedSlip, Drivetrain.WorstSlipRatio, DeltaSeconds, 4.f);
+	}
+	else
+	{
+		SmoothedSpeedMS = 0.f;
+		SmoothedSlip = 0.f;
+	}
 }
 
 void AExoneerHUD::DrawHUD()
@@ -65,9 +80,56 @@ void AExoneerHUD::DrawHUD()
 
 	DrawCrosshair();
 	DrawVitals(Engineer);
+	if (Engineer->IsPiloting())
+	{
+		DrawPilotPanel(Engineer);
+	}
 	DrawToolPanel(Engineer);
 	DrawInteractionPrompt(Engineer);
 	DrawInventory(Engineer);
+}
+
+void AExoneerHUD::DrawPilotPanel(const APlayerSurvivalCharacter* Engineer)
+{
+	// Interim visor instrumentation reading ONLY the public drivetrain
+	// summary, so the future diegetic dashboard swaps the renderer while the
+	// data source stays. Scope module 8 owns the final form.
+	const AVehicleConstruct* Construct = Engineer->PilotedConstruct;
+	if (!Construct)
+	{
+		return;
+	}
+	const FVehicleDrivetrainSummary Drivetrain = Construct->GetDrivetrainSummary();
+
+	float Y = 24.f + 16.f + 3.f * 15.f + 12.f;   // below the suit vitals block
+	const float X = 24.f;
+	DrawText(TEXT("== PILOT =="), VisorDim, X, Y, GEngine->GetSmallFont());
+	Y += 16.f;
+
+	const bool bGround = Construct->GetControlMode() == EPilotControlMode::Ground;
+	DrawReadout(X, Y, TEXT("MODE"), bGround ? TEXT("GROUND (V)") : TEXT("FLIGHT (V)"), VisorMain);
+	DrawReadout(X, Y, TEXT("SPEED"), FString::Printf(TEXT("%.1f m/s"), SmoothedSpeedMS), VisorMain);
+
+	const float SupplyPct = Construct->PowerSupplyFraction * 100.f;
+	DrawReadout(X, Y, TEXT("PWR SUPPLY"), FString::Printf(TEXT("%.0f%%"), SupplyPct), SupplyPct < 75.f ? VisorWarn : VisorMain);
+
+	if (Drivetrain.WheelCount > 0)
+	{
+		// Optimal traction window is s = 0.15..0.25 (GAME-SCOPE 4.1): green
+		// inside, warn when traction is collapsing toward full spin.
+		const FLinearColor SlipColor = SmoothedSlip > 0.35f ? VisorWarn
+			: (SmoothedSlip >= 0.10f && SmoothedSlip <= 0.28f ? VisorGood : VisorMain);
+		DrawReadout(X, Y, TEXT("SLIP"), FString::Printf(TEXT("%.0f%%  (best 15-25)"), SmoothedSlip * 100.f), SlipColor);
+		DrawReadout(X, Y, TEXT("SINKAGE"), FString::Printf(TEXT("%.0f cm"), Drivetrain.MaxSinkageM * 100.f),
+			Drivetrain.MaxSinkageM > 0.12f ? VisorWarn : VisorMain);
+		DrawReadout(X, Y, TEXT("TIRES"), FString::Printf(TEXT("%.0f kPa  (G-/H+)"), Drivetrain.MinTirePressureKPa), VisorMain);
+		DrawReadout(X, Y, TEXT("CONTACT"), FString::Printf(TEXT("%d/%d wheels"), Drivetrain.WheelsInContact, Drivetrain.WheelCount),
+			Drivetrain.WheelsInContact < Drivetrain.WheelCount ? VisorDim : VisorMain);
+		if (Drivetrain.bParkingBrake)
+		{
+			DrawReadout(X, Y, TEXT("BRAKE"), TEXT("PARKING ENGAGED"), VisorWarn);
+		}
+	}
 }
 
 void AExoneerHUD::DrawCrosshair()

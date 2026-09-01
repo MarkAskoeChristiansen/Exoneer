@@ -8,6 +8,7 @@
 #include "Interfaces/Constructible.h"
 #include "Interfaces/Pilotable.h"
 #include "Interfaces/Damageable.h"
+#include "Vehicles/VehicleWheelState.h"
 #include "ExoneerTypes.h"
 #include "VehicleConstruct.generated.h"
 
@@ -139,6 +140,18 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Vehicle") float PilotInputTimeoutSeconds = 0.5f;
 
 	/**
+	 * Rigid-body damping. Wheel-less constructs keep the legacy values (a
+	 * nudged frame should not roll forever). With any Complete wheel, damping
+	 * drops to the near-zero floor: Bekker compaction, the Janosi traction
+	 * limit, and bearing drag are then the ONLY motion resistance, or the
+	 * terramechanics tuning is meaningless.
+	 */
+	UPROPERTY(EditAnywhere, Category = "Vehicle|Physics") float LinearDampingNoWheels = 0.4f;
+	UPROPERTY(EditAnywhere, Category = "Vehicle|Physics") float AngularDampingNoWheels = 2.0f;
+	UPROPERTY(EditAnywhere, Category = "Vehicle|Physics") float LinearDampingWheeled = 0.01f;
+	UPROPERTY(EditAnywhere, Category = "Vehicle|Physics") float AngularDampingWheeled = 0.05f;
+
+	/**
 	 * Gyro torque multiplier while in Ground control mode. 0 by default: a
 	 * rover in the air is ballistic; free attitude authority is a Flight-mode
 	 * (thruster craft) legacy, flagged in the scope gap map.
@@ -162,9 +175,45 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Vehicle")
 	EPilotControlMode GetControlMode() const { return ControlMode; }
 
-	/** SERVER. True when the handbrake is held, input timed out, or no pilot is seated. Wheels hold against it. */
-	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category = "Vehicle")
+	/** True when the handbrake is held, input timed out, or no pilot is seated. Wheels hold against it. */
+	UPROPERTY(Replicated, VisibleInstanceOnly, BlueprintReadOnly, Category = "Vehicle")
 	bool bParkingBrakeEngaged = true;
+
+	/**
+	 * Per-wheel quantized state, replicated as a side fast array whose
+	 * callbacks never MarkVisualsDirty (a spinning wheel must not rebuild the
+	 * whole client vehicle). Written by UWheelModule under deadbands; polled
+	 * by UpdateWheelVisuals and GetDrivetrainSummary on both sides.
+	 */
+	UPROPERTY(Replicated)
+	FVehicleWheelStateList WheelStates;
+
+	/** SERVER. Find or add the side-array entry for a wheel block. */
+	FVehicleWheelStateItem& FindOrAddWheelStateItem(int32 BlockInstanceId);
+
+	/** SERVER. Drop a wheel's side-array entry (block removed/scrapped/moved). */
+	void RemoveWheelStateItem(int32 BlockInstanceId);
+
+	/** Aggregate drivetrain readout for instrumentation; safe on both sides. */
+	UFUNCTION(BlueprintPure, Category = "Vehicle")
+	FVehicleDrivetrainSummary GetDrivetrainSummary() const;
+
+	/** Any Complete block whose definition is a wheel. */
+	UFUNCTION(BlueprintPure, Category = "Vehicle")
+	bool HasCompleteWheel() const;
+
+	/** Persistent per-wheel settings queued by the save-load path until the module spawns. */
+	struct FWheelSavedState
+	{
+		float TirePressureKPa = 0.f;   // 0 = use the authored nominal
+		float SteerTrimDeg = 0.f;
+	};
+
+	/** SERVER. Queue saved wheel settings; UWheelModule::Initialize consumes them. */
+	void QueueWheelStateRestore(int32 BlockInstanceId, float TirePressureKPa, float SteerTrimDeg);
+
+	/** SERVER. Consume-and-remove queued settings for a block. False if none pending. */
+	bool TakeSavedWheelState(int32 BlockInstanceId, FWheelSavedState& OutState);
 
 	UPROPERTY(BlueprintAssignable) FOnVehicleBlocksChanged OnBlocksChanged;
 
@@ -206,8 +255,14 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Vehicle")
 	FTransform GetBlockWorldTransform(const FVehicleBlockRecord& Record) const;
 
+	/** Block transform in construct-local space: orientation quat at the AABB center. */
+	FTransform GetBlockLocalTransform(const FVehicleBlockRecord& Record) const;
+
 	/** Sun fraction pull-through for solar modules (0 when no env manager). */
 	float GetSunFraction() const;
+
+	/** Cached world environment manager (biome default soil, weather); may be null. */
+	const class APlanetEnvironmentManager* GetEnvironmentManager() const;
 
 	/** SERVER. Pilot input packet, forwarded by the pilot's character RPC. Held until the next packet or timeout. */
 	void SetPilotInput(const FPilotInput& Input);
@@ -240,6 +295,7 @@ public:
 	virtual float ApplyExoneerDamage_Implementation(float Amount, EExoneerDamageType Type, AActor* Instigator) override;
 
 	virtual void Tick(float DeltaSeconds) override;
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 
 	/** Rebuild boxes/instances/cell map from records. Client fast array hook. */
@@ -260,6 +316,17 @@ protected:
 	UPROPERTY() TMap<int32, TObjectPtr<UBoxComponent>> BlockBodies;
 	UPROPERTY() TMap<TObjectPtr<UStaticMesh>, TObjectPtr<UInstancedStaticMeshComponent>> VisualLayers;
 
+	/**
+	 * Dedicated animated mesh per Complete wheel block (both sides). Wheels
+	 * are excluded from the ISMC layers: instance indices there are discarded
+	 * and every replicated record change rebuilds all instances, so an ISMC
+	 * instance can neither spin nor steer.
+	 */
+	UPROPERTY() TMap<int32, TObjectPtr<UStaticMeshComponent>> WheelVisuals;
+
+	/** Locally integrated wheel spin angles (rad), keyed by BlockInstanceId. Cosmetic, never replicated. */
+	TMap<int32, float> WheelSpinAngles;
+
 	int32 NextBlockInstanceId = 0;
 	bool bVisualsDirty = false;
 
@@ -273,13 +340,38 @@ protected:
 	uint8 LastProcessedModeToggle = 0;
 	bool bModeToggleSyncPending = true;
 
+public:
+	/**
+	 * SERVER. Set by the save-load replay to restore parked geometry
+	 * byte-exact (a rover saved with wheels in soft soil must not lose them
+	 * to the overlap rejection on load). Cleared after the replay.
+	 */
+	bool bSuppressWorldOverlapCheck = false;
+
+protected:
+
 	UFUNCTION() void OnRep_Pilot();
+
+	/**
+	 * SERVER. One Chaos sim callback for all this construct's wheels, running
+	 * the terramechanics per internal solver substep. Registered on demand in
+	 * MarshalWheelPhysics; freed in EndPlay through the solver (never deleted
+	 * directly - the solver owns the lifetime after unregister).
+	 */
+	class FExoneerWheelSimCallback* WheelSimCallback = nullptr;
+
+	/** SERVER. Pending saved wheel settings, keyed by BlockInstanceId. */
+	TMap<int32, FWheelSavedState> PendingWheelRestore;
 
 	// --- Internals ---
 	void RebuildDerivedState();          // cell map + bodies + visuals + mass
 	void ServerTickPowerLedger(float DeltaSeconds);
 	void ServerTickModules(float DeltaSeconds);
 	void ServerRouteThrust(float DeltaSeconds);
+	void ServerRouteDrive(float DeltaSeconds);   // ground mode: throttle/steer/brake to wheel modules (Ackermann)
+	void UpdateWheelVisuals(float DeltaSeconds); // both sides: pose wheel meshes from WheelStates
+	void DrainWheelTelemetry();          // server: pop physics outputs into wheel modules (pre-ledger)
+	void MarshalWheelPhysics();          // server: build this frame's sim-callback input (post module tick)
 	void SyncModulesToRecords();         // create/destroy modules on phase changes
 	void RunSplitDetection();            // after any removal
 	FVehicleBlockRecord* FindMutableRecord(int32 BlockInstanceId);

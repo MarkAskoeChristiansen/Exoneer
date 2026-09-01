@@ -29,6 +29,13 @@ public:
 	/** SERVER. Bind to the construct + record. */
 	virtual void Initialize(AVehicleConstruct* InConstruct, int32 InBlockInstanceId);
 
+	/**
+	 * SERVER. Called exactly once before the construct drops its reference
+	 * (block removed, phase regressed, or records moved by split detection).
+	 * Base is empty; overrides must be safe to call mid-tick.
+	 */
+	virtual void Shutdown() {}
+
 	/** SERVER. Called from the construct's physics tick while functional. */
 	virtual void TickModule(float DeltaSeconds) {}
 

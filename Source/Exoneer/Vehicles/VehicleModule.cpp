@@ -4,6 +4,7 @@
 #include "Data/VehicleBlockDefinitionDataAsset.h"
 #include "Interfaces/Damageable.h"
 #include "Interfaces/Pilotable.h"
+#include "Vehicles/ExoneerVehicleUnits.h"
 #include "Components/StaticMeshComponent.h"
 #include "GameFramework/Pawn.h"
 
@@ -55,15 +56,13 @@ void UThrusterModule::TickModule(float DeltaSeconds)
 		return;
 	}
 
-	// Thrust along the block's local -X, scaled by throttle and the power ledger.
-	// MaxThrust is authored in Newtons; UE forces are kg * cm/s^2, so 1 N = 100
-	// force units (gravity is 980 cm/s^2). Without the conversion, realistic
-	// thrust values come out 100x too weak to lift anything.
-	constexpr float NewtonsToUEForce = 100.f;
+	// Thrust along the block's local -X, scaled by throttle and the power
+	// ledger. MaxThrust is authored in Newtons; the shared conversion lives in
+	// ExoneerVehicleUnits.h (1 N = 100 kg*cm/s^2).
 	const FTransform BlockTransform = Owner->GetBlockWorldTransform(*Record);
 	const FVector ThrustDirection = -BlockTransform.GetUnitAxis(EAxis::X);
 	const float ForceNewtons = Def->MaxThrust * Throttle * Owner->PowerSupplyFraction;
-	Owner->PhysicsRoot->AddForceAtLocation(ThrustDirection * ForceNewtons * NewtonsToUEForce, BlockTransform.GetLocation());
+	Owner->PhysicsRoot->AddForceAtLocation(ThrustDirection * ForceNewtons * ExoneerUnits::NewtonsToUEForce, BlockTransform.GetLocation());
 }
 
 float UThrusterModule::GetCurrentDraw() const

@@ -206,6 +206,7 @@ item_specs = {
     "plate":          ("Metal Plate", CAT.COMPONENT, 100, 6.0, 1.2),
     "motor":          ("Motor", CAT.COMPONENT, 50, 8.0, 1.5),
     "computer_board": ("Computer Board", CAT.COMPONENT, 50, 0.5, 0.3),
+    "tire":           ("Tire", CAT.COMPONENT, 20, 25.0, 4.0),
     "oxygen":         ("Oxygen Canister", CAT.CONSUMABLE, 50, 0.5, 0.5),
 }
 items = {}
@@ -376,6 +377,46 @@ blocks["solar"] = ensure_block(
     [make_stage([make_entry(items["silicon_wafer"], 1), make_entry(items["plate"], 1)], 2.0)],
     module=module_class("SolarModule"), mass=30, health=120, power=1200.0)
 
+# Wheels: 3x1x3 cells (75 cm block housing a 70 cm tire with bulge clearance).
+# Terramechanics constants ride the C++ FVehicleWheelSpec defaults - only the
+# per-block differences are authored here. The Z-aligned engine cylinder is
+# rolled 90 deg so it spins about the block's Y axle. PowerDelta is the rated
+# electrical wattage of the hub motor (the ledger's demand ceiling comes from
+# physics, not from this number).
+def make_wheel_spec(steerable):
+    spec = unreal.VehicleWheelSpec()
+    spec.set_editor_property("steerable", steerable)
+    return spec
+
+def make_wheel_mesh_transform():
+    rotator = unreal.Rotator()
+    rotator.set_editor_property("roll", 90.0)
+    transform = unreal.Transform()
+    transform.set_editor_property("rotation", rotator.quaternion())
+    return transform
+
+wheel_stage = [make_stage([make_entry(items["tire"], 1), make_entry(items["motor"], 1), make_entry(items["plate"], 1)], 3.5)]
+blocks["wheel_steer"] = ensure_block(
+    "DA_Block_WheelSteer", "wheel_steer", "Steering Wheel Assembly", CYLINDER,
+    wheel_stage, module=module_class("WheelModule"), mass=90, health=250, power=-2500.0,
+    size_in_cells=(3, 1, 3),
+    extra={
+        "is_wheel": True,
+        "wheel_spec": make_wheel_spec(True),
+        "allow_terrain_overlap_on_place": True,
+        "mesh_relative_transform": make_wheel_mesh_transform(),
+    })
+blocks["wheel_drive"] = ensure_block(
+    "DA_Block_WheelDrive", "wheel_drive", "Drive Wheel Assembly", CYLINDER,
+    wheel_stage, module=module_class("WheelModule"), mass=90, health=250, power=-2500.0,
+    size_in_cells=(3, 1, 3),
+    extra={
+        "is_wheel": True,
+        "wheel_spec": make_wheel_spec(False),
+        "allow_terrain_overlap_on_place": True,
+        "mesh_relative_transform": make_wheel_mesh_transform(),
+    })
+
 # ---------------------------------------------------------------------------
 # 5. Recipes
 # ---------------------------------------------------------------------------
@@ -389,6 +430,7 @@ recipe_specs = [
     ("recipe_motor", "Assemble Motor", STATION.FABRICATOR, [("iron_ingot", 1), ("plate", 1)], [("motor", 1)], 5.0, 200.0),
     ("recipe_computer_board", "Print Computer Board", STATION.FABRICATOR, [("silicon_wafer", 1), ("plate", 1)], [("computer_board", 1)], 5.0, 250.0),
     ("recipe_oxygen", "Electrolyze Oxygen", STATION.OXYGEN_GENERATOR, [("ice", 1)], [("oxygen", 5)], 3.0, 150.0),
+    ("recipe_tire", "Mold Tire", STATION.FABRICATOR, [("carbon", 4), ("iron_ingot", 1)], [("tire", 1)], 6.0, 250.0),
 ]
 
 def make_ingredient(item_id, count):
@@ -526,14 +568,16 @@ char_cdo.set_editor_property("quick_bar", [
     pieces["fabricator"], pieces["oxygen_generator"],
     blocks["frame"], blocks["cockpit"], blocks["thruster"],
     blocks["battery"], blocks["solar"],
+    blocks["wheel_steer"], blocks["wheel_drive"],
 ])
 char_cdo.set_editor_property("starter_items", [
     make_entry(items["iron_ingot"], 40),
     make_entry(items["plate"], 30),
-    make_entry(items["motor"], 10),
+    make_entry(items["motor"], 12),
     make_entry(items["silicon_wafer"], 10),
     make_entry(items["computer_board"], 10),
     make_entry(items["ice"], 20),
+    make_entry(items["tire"], 6),
 ])
 
 bp_gm = ensure_blueprint("BP_ExoneerGameMode", unreal.ExoneerGameMode)

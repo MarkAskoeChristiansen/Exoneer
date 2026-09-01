@@ -5,6 +5,7 @@
 #include "Engine/DataAsset.h"
 #include "ExoneerTypes.h"
 #include "Vehicles/VehicleModule.h"   // TSubclassOf<UVehicleModule> needs the complete type
+#include "Vehicles/VehicleWheelSpec.h"
 #include "VehicleBlockDefinitionDataAsset.generated.h"
 
 class UStaticMesh;
@@ -60,6 +61,29 @@ public:
 	/** Newtons at full throttle (thruster blocks). */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Module")
 	float MaxThrust = 0.f;
+
+	/** True for wheel blocks: excluded from ISMC visuals, gets a UWheelModule + a dedicated animated mesh component. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Wheel")
+	bool bIsWheel = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Wheel", meta = (EditCondition = "bIsWheel"))
+	FVehicleWheelSpec WheelSpec;
+
+	/**
+	 * Skip the world-static overlap rejection when placing this block: wheels
+	 * sit at ground level by design and would otherwise be unplaceable on a
+	 * hull resting on terrain.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Block")
+	bool bAllowTerrainOverlapOnPlace = false;
+
+	/**
+	 * Applied between the block's local frame and the mesh, before the
+	 * cell-fit scale. Lets the Z-aligned engine cylinder stand in for a
+	 * Y-axis wheel (roll 90).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Visual")
+	FTransform MeshRelativeTransform = FTransform::Identity;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Visual")
 	TSoftObjectPtr<UStaticMesh> Mesh;

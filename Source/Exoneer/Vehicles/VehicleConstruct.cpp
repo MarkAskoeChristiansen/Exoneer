@@ -3,7 +3,13 @@
 #include "Exoneer.h"
 #include "Vehicles/VehicleModule.h"
 #include "Vehicles/VehicleOrientation.h"
+#include "Vehicles/ExoneerVehicleUnits.h"
+#include "Vehicles/WheelModule.h"
+#include "Vehicles/WheelSimCallback.h"
 #include "Data/VehicleBlockDefinitionDataAsset.h"
+#include "PBDRigidsSolver.h"
+#include "Physics/Experimental/PhysScene_Chaos.h"
+#include "PhysicsEngine/BodyInstance.h"
 #include "Data/ItemDefinitionDataAsset.h"
 #include "Components/InventoryComponent.h"
 #include "Components/BoxComponent.h"
@@ -41,14 +47,6 @@ namespace
 		const FIntVector Size = Record.Def ? Record.Def->SizeInCells : FIntVector(1, 1, 1);
 		const FIntVector R = ExoneerVehicleOrientation::RotateOffset(Size - FIntVector(1, 1, 1), Record.Orientation);
 		return FIntVector(FMath::Abs(R.X) + 1, FMath::Abs(R.Y) + 1, FMath::Abs(R.Z) + 1);
-	}
-
-	/** Block transform in construct-local space: orientation quat at the AABB center. */
-	FTransform GetBlockLocalTransform(const FVehicleBlockRecord& Record)
-	{
-		const FIntVector AabbCells = GetRotatedAabbCells(Record);
-		const FVector Center = (FVector(Record.Origin) + FVector(AabbCells) * 0.5f) * AVehicleConstruct::CellSize;
-		return FTransform(ExoneerVehicleOrientation::GetQuat(Record.Orientation), Center);
 	}
 
 	/** Units of one stage material that must have been consumed at the given progress. */
@@ -136,9 +134,10 @@ void AVehicleConstruct::BeginPlay()
 		PhysicsRoot->SetCollisionResponseToAllChannels(ECR_Ignore);
 		PhysicsRoot->BodyInstance.SetMassOverride(1.f, true);
 		// Grounded-machine feel: without damping a nudged 25 cm block rolls
-		// across the plain forever like it is in orbit.
-		PhysicsRoot->SetLinearDamping(0.4f);
-		PhysicsRoot->SetAngularDamping(2.f);
+		// across the plain forever like it is in orbit. RebuildDerivedState
+		// swaps these for the near-zero wheeled values once wheels exist.
+		PhysicsRoot->SetLinearDamping(LinearDampingNoWheels);
+		PhysicsRoot->SetAngularDamping(AngularDampingNoWheels);
 		// Simulation starts in RebuildDerivedState once the construct has at
 		// least one COMPLETE block: ghost boxes carry no physical collision,
 		// so a freshly founded frame would free-fall through the floor.
@@ -155,6 +154,8 @@ void AVehicleConstruct::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& Ou
 	DOREPLIFETIME(AVehicleConstruct, PilotPawn);
 	DOREPLIFETIME(AVehicleConstruct, ActiveCockpitId);
 	DOREPLIFETIME(AVehicleConstruct, ControlMode);
+	DOREPLIFETIME(AVehicleConstruct, WheelStates);
+	DOREPLIFETIME(AVehicleConstruct, bParkingBrakeEngaged);
 }
 
 // --- Queries ---
@@ -270,6 +271,13 @@ int32 AVehicleConstruct::FindBlockAtWorldPoint(const FVector& WorldPoint) const
 	return BestId;
 }
 
+FTransform AVehicleConstruct::GetBlockLocalTransform(const FVehicleBlockRecord& Record) const
+{
+	const FIntVector AabbCells = GetRotatedAabbCells(Record);
+	const FVector Center = (FVector(Record.Origin) + FVector(AabbCells) * 0.5f) * CellSize;
+	return FTransform(ExoneerVehicleOrientation::GetQuat(Record.Orientation), Center);
+}
+
 FTransform AVehicleConstruct::GetBlockWorldTransform(const FVehicleBlockRecord& Record) const
 {
 	return GetBlockLocalTransform(Record) * ActorToWorld();
@@ -293,6 +301,13 @@ float AVehicleConstruct::GetSunFraction() const
 		}
 	}
 	return GSunFractionManager.IsValid() ? GSunFractionManager->GetSunFraction() : 1.f;
+}
+
+const APlanetEnvironmentManager* AVehicleConstruct::GetEnvironmentManager() const
+{
+	// Reuse the sun-fraction cache; GetSunFraction refreshes it per world.
+	GetSunFraction();
+	return GSunFractionManager.Get();
 }
 
 // --- Grid mutations (server) ---
@@ -321,7 +336,10 @@ bool AVehicleConstruct::CanPlaceBlock(UVehicleBlockDefinitionDataAsset* Def, FIn
 	// World geometry check: the grid only knows THIS construct's cells, so a
 	// block could otherwise clip into base pieces, terrain, or other
 	// constructs. Shrunk slightly so flush contact does not self-reject.
-	if (UWorld* World = GetWorld())
+	// Wheels opt out per definition (they sit at ground level by design);
+	// the save-load replay suppresses it construct-wide for byte-exact
+	// geometry restoration.
+	if (UWorld* World = GetWorld(); World && !Def->bAllowTerrainOverlapOnPlace && !bSuppressWorldOverlapCheck)
 	{
 		FIntVector MinCell = Cells[0];
 		FIntVector MaxCell = Cells[0];
@@ -454,6 +472,10 @@ bool AVehicleConstruct::RemoveBlock(int32 BlockInstanceId)
 		return false;
 	}
 
+	if (UVehicleModule* Module = Modules.FindRef(BlockInstanceId))
+	{
+		Module->Shutdown();
+	}
 	Modules.Remove(BlockInstanceId);
 	BlockList.Blocks.RemoveAt(Index);
 	BlockList.MarkArrayDirty();
@@ -1027,9 +1049,6 @@ void AVehicleConstruct::Tick(float DeltaSeconds)
 	if (HasAuthority())
 	{
 		SyncModulesToRecords();
-		ServerTickPowerLedger(DeltaSeconds);
-		ServerRouteThrust(DeltaSeconds);
-		ServerTickModules(DeltaSeconds);
 
 		// Hold the last pilot packet until the next one arrives; past the
 		// timeout (pilot lag/disconnect) zero the axes and engage the parking
@@ -1043,7 +1062,137 @@ void AVehicleConstruct::Tick(float DeltaSeconds)
 		}
 		bParkingBrakeEngaged = bInputTimedOut || !PilotPawn
 			|| (PilotInput.HeldFlags & EPilotHeldFlags::Handbrake) != 0;
+
+		// Physics-thread telemetry lands before the ledger reads motor draws.
+		DrainWheelTelemetry();
+		ServerTickPowerLedger(DeltaSeconds);
+		ServerRouteThrust(DeltaSeconds);
+		ServerRouteDrive(DeltaSeconds);
+		ServerTickModules(DeltaSeconds);
+		// Wheel modules refreshed their ground caches in their tick; marshal
+		// this frame's input before the solver advances (we run TG_PrePhysics).
+		MarshalWheelPhysics();
 	}
+
+	// Both sides: pose the animated wheel meshes from the replicated state.
+	UpdateWheelVisuals(DeltaSeconds);
+}
+
+void AVehicleConstruct::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	if (WheelSimCallback)
+	{
+		// The solver owns the object after unregister; never delete or touch
+		// it again. Re-fetch the solver - caching it across frames is unsafe.
+		if (UWorld* World = GetWorld())
+		{
+			if (FPhysScene* Scene = World->GetPhysicsScene())
+			{
+				if (Chaos::FPhysicsSolver* Solver = Scene->GetSolver())
+				{
+					Solver->UnregisterAndFreeSimCallbackObject_External(WheelSimCallback);
+				}
+			}
+		}
+		WheelSimCallback = nullptr;
+	}
+	Super::EndPlay(EndPlayReason);
+}
+
+void AVehicleConstruct::DrainWheelTelemetry()
+{
+	if (!WheelSimCallback)
+	{
+		return;
+	}
+	while (Chaos::TSimCallbackOutputHandle<FExoneerWheelSimOutput> Output = WheelSimCallback->PopOutputData_External())
+	{
+		for (const ExoneerWheelSim::FWheelSimTelemetry& Telemetry : Output->Wheels)
+		{
+			if (UWheelModule* Wheel = Cast<UWheelModule>(Modules.FindRef(Telemetry.BlockInstanceId)))
+			{
+				Wheel->ConsumeTelemetry(Telemetry);
+			}
+		}
+	}
+}
+
+void AVehicleConstruct::MarshalWheelPhysics()
+{
+	// Collect the live wheel modules with valid ground caches this frame.
+	TArray<UWheelModule*, TInlineAllocator<12>> WheelModules;
+	for (const TPair<int32, TObjectPtr<UVehicleModule>>& Pair : Modules)
+	{
+		if (UWheelModule* Wheel = Cast<UWheelModule>(Pair.Value.Get()))
+		{
+			WheelModules.Add(Wheel);
+		}
+	}
+	if (WheelModules.Num() == 0 || !PhysicsRoot || !PhysicsRoot->IsSimulatingPhysics())
+	{
+		return;
+	}
+
+	if (!WheelSimCallback)
+	{
+		UWorld* World = GetWorld();
+		FPhysScene* Scene = World ? World->GetPhysicsScene() : nullptr;
+		Chaos::FPhysicsSolver* Solver = Scene ? Scene->GetSolver() : nullptr;
+		if (!Solver)
+		{
+			return;
+		}
+		WheelSimCallback = Solver->CreateAndRegisterSimCallbackObject_External<FExoneerWheelSimCallback>();
+	}
+
+	FExoneerWheelSimInput* Input = WheelSimCallback->GetProducerInputData_External();
+	// The producer object is sticky until a physics step consumes it - Reset
+	// gives last-write-wins instead of accumulating stale wheel entries.
+	Input->Reset();
+
+	FBodyInstance* Body = PhysicsRoot->GetBodyInstance();
+	Input->Proxy = Body ? Body->GetPhysicsActor() : nullptr;
+	if (!Input->Proxy)
+	{
+		return;
+	}
+
+	Input->Wheels.Reserve(WheelModules.Num());
+	bool bWantsWake = false;
+	for (UWheelModule* Wheel : WheelModules)
+	{
+		ExoneerWheelSim::FWheelSimInputItem Item;
+		if (Wheel->BuildSimInput(Item))
+		{
+			bWantsWake |= FMath::Abs(Item.Command.Throttle) > 0.05f || Item.Command.Brake > 0.05f;
+			Input->Wheels.Add(MoveTemp(Item));
+		}
+	}
+
+	// Wheel forces are applied with bInvalidate=false so a parked rover can
+	// sleep; drive input must therefore wake the body explicitly.
+	if (bWantsWake && !PhysicsRoot->RigidBodyIsAwake())
+	{
+		PhysicsRoot->WakeAllRigidBodies();
+	}
+}
+
+void AVehicleConstruct::QueueWheelStateRestore(int32 BlockInstanceId, float TirePressureKPa, float SteerTrimDeg)
+{
+	FWheelSavedState& State = PendingWheelRestore.FindOrAdd(BlockInstanceId);
+	State.TirePressureKPa = TirePressureKPa;
+	State.SteerTrimDeg = SteerTrimDeg;
+}
+
+bool AVehicleConstruct::TakeSavedWheelState(int32 BlockInstanceId, FWheelSavedState& OutState)
+{
+	if (const FWheelSavedState* Found = PendingWheelRestore.Find(BlockInstanceId))
+	{
+		OutState = *Found;
+		PendingWheelRestore.Remove(BlockInstanceId);
+		return true;
+	}
+	return false;
 }
 
 // --- Server internals ---
@@ -1075,6 +1224,10 @@ void AVehicleConstruct::SyncModulesToRecords()
 	{
 		if (!LiveIds.Contains(It->Key))
 		{
+			if (It->Value)
+			{
+				It->Value->Shutdown();
+			}
 			It.RemoveCurrent();
 		}
 	}
@@ -1254,6 +1407,229 @@ void AVehicleConstruct::ServerRouteThrust(float DeltaSeconds)
 	}
 }
 
+void AVehicleConstruct::ServerRouteDrive(float DeltaSeconds)
+{
+	// Route ground-drive commands to wheel modules. Flight mode zeroes drive
+	// and service brake (the parking brake still applies through the flag),
+	// so a rover with thrusters cannot double-drive.
+	const bool bGround = ControlMode == EPilotControlMode::Ground;
+	const float ThrottleCmd = bGround && PilotPawn ? PilotInput.Throttle : 0.f;
+	const float SteerCmd = bGround && PilotPawn ? PilotInput.Steer : 0.f;
+	const float BrakeCmd = bGround && PilotPawn ? PilotInput.Brake : 0.f;
+
+	// Ackermann reference frame: the active cockpit's local frame (actor axes
+	// without one, e.g. before the first seating).
+	FQuat FrameLocal = FQuat::Identity;
+	if (const FVehicleBlockRecord* Cockpit = FindRecord(ActiveCockpitId))
+	{
+		FrameLocal = ExoneerVehicleOrientation::GetQuat(Cockpit->Orientation);
+	}
+	const FVector ForwardLocal = FrameLocal.GetAxisX();
+	const FVector RightLocal = FrameLocal.GetAxisY();
+
+	struct FWheelEntry
+	{
+		UWheelModule* Module = nullptr;
+		const FVehicleWheelSpec* Spec = nullptr;
+		float Longitudinal = 0.f;   // m, along cockpit forward
+		float Lateral = 0.f;        // m, along cockpit right
+	};
+	TArray<FWheelEntry, TInlineAllocator<12>> Wheels;
+	float NonSteerableSum = 0.f;
+	int32 NonSteerableCount = 0;
+	float MinLongitudinal = TNumericLimits<float>::Max();
+
+	for (const TPair<int32, TObjectPtr<UVehicleModule>>& Pair : Modules)
+	{
+		UWheelModule* Wheel = Cast<UWheelModule>(Pair.Value.Get());
+		if (!Wheel)
+		{
+			continue;
+		}
+		const FVehicleBlockRecord* Record = Wheel->FindRecord();
+		if (!Record || !Record->Def)
+		{
+			continue;
+		}
+		FWheelEntry& Entry = Wheels.AddDefaulted_GetRef();
+		Entry.Module = Wheel;
+		Entry.Spec = &Record->Def->WheelSpec;
+		const FVector CenterLocal = GetBlockLocalTransform(*Record).GetLocation() / ExoneerUnits::CmPerM;
+		Entry.Longitudinal = FVector::DotProduct(CenterLocal, ForwardLocal);
+		Entry.Lateral = FVector::DotProduct(CenterLocal, RightLocal);
+		MinLongitudinal = FMath::Min(MinLongitudinal, Entry.Longitudinal);
+		if (!Entry.Spec->bSteerable)
+		{
+			NonSteerableSum += Entry.Longitudinal;
+			++NonSteerableCount;
+		}
+	}
+	if (Wheels.Num() == 0)
+	{
+		return;
+	}
+
+	// Rear-axle line: centroid of the non-steered wheels (all-steer rigs fall
+	// back to the rear-most wheel). The Ackermann turn center sits on it.
+	const float RearAxle = NonSteerableCount > 0 ? NonSteerableSum / NonSteerableCount : MinLongitudinal;
+
+	float SteerableWheelbaseSum = 0.f;
+	int32 SteerableCount = 0;
+	for (const FWheelEntry& Entry : Wheels)
+	{
+		if (Entry.Spec->bSteerable)
+		{
+			SteerableWheelbaseSum += FMath::Max(Entry.Longitudinal - RearAxle, 0.f);
+			++SteerableCount;
+		}
+	}
+	const float MeanWheelbase = SteerableCount > 0
+		? FMath::Max(SteerableWheelbaseSum / SteerableCount, 0.3f)
+		: 0.3f;
+
+	for (FWheelEntry& Entry : Wheels)
+	{
+		UWheelModule* Wheel = Entry.Module;
+		const FVehicleWheelSpec& Spec = *Entry.Spec;
+		Wheel->ThrottleCommand = Spec.bDriven ? ThrottleCmd : 0.f;
+		Wheel->BrakeCommand = BrakeCmd;
+		Wheel->bParkingBrake = bParkingBrakeEngaged;
+		Wheel->TargetSlipCap = 1.f;   // Shear Control talent lowers this to ~0.3 when talents land.
+
+		float TargetSteer = 0.f;
+		if (Spec.bSteerable)
+		{
+			const float MaxSteer = FMath::DegreesToRadians(Spec.MaxSteerAngleDeg);
+			const float MeanAngle = SteerCmd * MaxSteer;
+			const float Wheelbase = FMath::Max(Entry.Longitudinal - RearAxle, 0.f);
+			if (FMath::Abs(MeanAngle) < 0.017f || Wheelbase < 0.05f)
+			{
+				TargetSteer = MeanAngle;
+			}
+			else
+			{
+				// True Ackermann from the layout: one turn center on the
+				// rear-axle line; each steered wheel aims tangentially at it,
+				// so the inner wheel steers tighter. Positive steer = right.
+				const float Side = MeanAngle > 0.f ? 1.f : -1.f;
+				const float CenterLateral = Side * MeanWheelbase / FMath::Tan(FMath::Abs(MeanAngle));
+				const float Denominator = CenterLateral - Entry.Lateral;
+				TargetSteer = FMath::Abs(Denominator) < 0.1f
+					? Side * MaxSteer
+					: FMath::Atan(Wheelbase / Denominator);
+			}
+			TargetSteer = FMath::Clamp(TargetSteer, -MaxSteer, MaxSteer);
+		}
+		Wheel->TargetSteerAngleRad = TargetSteer;
+	}
+}
+
+void AVehicleConstruct::UpdateWheelVisuals(float DeltaSeconds)
+{
+	for (TPair<int32, TObjectPtr<UStaticMeshComponent>>& Pair : WheelVisuals)
+	{
+		UStaticMeshComponent* WheelMesh = Pair.Value.Get();
+		const FVehicleBlockRecord* Record = FindRecord(Pair.Key);
+		if (!WheelMesh || !Record || !Record->Def)
+		{
+			continue;
+		}
+		const FVehicleWheelSpec& Spec = Record->Def->WheelSpec;
+		const FVehicleWheelStateItem* State = WheelStates.FindByBlockId(Pair.Key);
+		const float SteerAngle = State ? State->GetSteerAngleRad() : 0.f;
+		const float Omega = State ? State->GetOmegaRadS() : 0.f;
+		const float CompressionM = State ? State->GetCompression01() * Spec.TravelM : 0.f;
+
+		// Spin is integrated locally from the replicated RATE - the position
+		// never replicates and drift is invisible on a rolling wheel.
+		float& SpinAngle = WheelSpinAngles.FindOrAdd(Pair.Key);
+		SpinAngle = FMath::Fmod(SpinAngle + Omega * DeltaSeconds, 2.f * PI);
+
+		// Mesh-frame scale: MeshRelativeTransform maps the mesh onto the wheel
+		// frame (axle = block local Y), so the target size is pulled back
+		// through its rotation - the Z-aligned engine cylinder scales on its
+		// own axes even though it spins about Y after the roll.
+		UStaticMesh* Mesh = WheelMesh->GetStaticMesh();
+		const FVector MeshSize = Mesh ? Mesh->GetBoundingBox().GetSize() : FVector(100.f);
+		const FVector TargetWheelFrame(2.f * Spec.RadiusM, Spec.WidthM, 2.f * Spec.RadiusM);
+		const FVector TargetMeshFrame = Record->Def->MeshRelativeTransform.GetRotation()
+			.UnrotateVector(TargetWheelFrame).GetAbs() * ExoneerUnits::CmPerM;
+		const FVector Scale(
+			MeshSize.X > 0.f ? TargetMeshFrame.X / MeshSize.X : 1.f,
+			MeshSize.Y > 0.f ? TargetMeshFrame.Y / MeshSize.Y : 1.f,
+			MeshSize.Z > 0.f ? TargetMeshFrame.Z / MeshSize.Z : 1.f);
+
+		// Chain (applied left to right): mesh scale, mesh alignment, spin
+		// about the axle (block local Y), steer about block local Z plus the
+		// suspension drop along block local -Z, then the block's frame.
+		const float HubDropUU = (Spec.RestLengthM - CompressionM) * ExoneerUnits::CmPerM;
+		const FTransform ScaleXf(FQuat::Identity, FVector::ZeroVector, Scale);
+		const FTransform SpinXf(FQuat(FVector::YAxisVector, SpinAngle));
+		const FTransform SteerAndDropXf(FQuat(FVector::ZAxisVector, SteerAngle), FVector(0.f, 0.f, -HubDropUU));
+		const FTransform Relative = ScaleXf * Record->Def->MeshRelativeTransform * SpinXf * SteerAndDropXf * GetBlockLocalTransform(*Record);
+		WheelMesh->SetRelativeTransform(Relative);
+	}
+}
+
+FVehicleWheelStateItem& AVehicleConstruct::FindOrAddWheelStateItem(int32 BlockInstanceId)
+{
+	if (FVehicleWheelStateItem* Existing = WheelStates.FindByBlockId(BlockInstanceId))
+	{
+		return *Existing;
+	}
+	FVehicleWheelStateItem& Added = WheelStates.Items.AddDefaulted_GetRef();
+	Added.BlockInstanceId = BlockInstanceId;
+	WheelStates.MarkItemDirty(Added);
+	return Added;
+}
+
+void AVehicleConstruct::RemoveWheelStateItem(int32 BlockInstanceId)
+{
+	const int32 Removed = WheelStates.Items.RemoveAll([BlockInstanceId](const FVehicleWheelStateItem& Item)
+	{
+		return Item.BlockInstanceId == BlockInstanceId;
+	});
+	if (Removed > 0)
+	{
+		WheelStates.MarkArrayDirty();
+	}
+}
+
+FVehicleDrivetrainSummary AVehicleConstruct::GetDrivetrainSummary() const
+{
+	FVehicleDrivetrainSummary Summary;
+	Summary.SpeedMS = GetVelocity().Size() / ExoneerUnits::CmPerM;
+	Summary.bParkingBrake = bParkingBrakeEngaged;
+	bool bFirst = true;
+	for (const FVehicleWheelStateItem& Item : WheelStates.Items)
+	{
+		++Summary.WheelCount;
+		Summary.WorstSlipRatio = FMath::Max(Summary.WorstSlipRatio, Item.GetSlipRatioAbs());
+		Summary.MaxSinkageM = FMath::Max(Summary.MaxSinkageM, Item.GetSinkageM());
+		Summary.MinTirePressureKPa = bFirst
+			? Item.GetTirePressureKPa()
+			: FMath::Min(Summary.MinTirePressureKPa, Item.GetTirePressureKPa());
+		bFirst = false;
+		if (Item.CompressionQ > 0)
+		{
+			++Summary.WheelsInContact;
+		}
+	}
+	return Summary;
+}
+
+bool AVehicleConstruct::HasCompleteWheel() const
+{
+	for (const FVehicleBlockRecord& Record : BlockList.Blocks)
+	{
+		if (Record.Phase == EConstructionPhase::Complete && Record.Def && Record.Def->bIsWheel)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
 void AVehicleConstruct::ServerTickModules(float DeltaSeconds)
 {
 	// Tick a snapshot; a module may clear pilot state but never mutates the map.
@@ -1320,6 +1696,13 @@ void AVehicleConstruct::RebuildDerivedState()
 			}
 			BlockBodies.Empty();
 		}
+
+		// Damping follows wheel presence: with wheels the terramechanics model
+		// owns ALL motion resistance and legacy damping would silently add a
+		// second, non-physical drag on top of the tuned Bekker/Janosi forces.
+		const bool bWheeled = HasCompleteWheel();
+		PhysicsRoot->SetLinearDamping(bWheeled ? LinearDampingWheeled : LinearDampingNoWheels);
+		PhysicsRoot->SetAngularDamping(bWheeled ? AngularDampingWheeled : AngularDampingNoWheels);
 	}
 
 	// 3. Collision boxes, one per record. Weld state cannot change in place,
@@ -1334,10 +1717,24 @@ void AVehicleConstruct::RebuildDerivedState()
 		LiveIds.Add(Record.BlockInstanceId);
 
 		const FIntVector AabbCells = GetRotatedAabbCells(Record);
-		const FVector Extent = FVector(AabbCells) * (CellSize * 0.5f);
+		FVector Extent = FVector(AabbCells) * (CellSize * 0.5f);
 		const FVector Center = (FVector(Record.Origin) + FVector(AabbCells) * 0.5f) * CellSize;
 		const bool bComplete = Record.Phase == EConstructionPhase::Complete;
 		const bool bSolid = bAuthority && bComplete;   // Only the server welds physics bodies.
+
+		// Complete wheels get a hub-sized core box instead of the full cell
+		// AABB: the suspension + terramechanics model carries the vehicle at
+		// ride height (a full-size rigid box would touch ground first and the
+		// soil model would never engage), while the core still hard-stops
+		// curbs and full-compression terrain clips, and still welds its mass.
+		if (bComplete && Record.Def->bIsWheel)
+		{
+			const FVehicleWheelSpec& Wheel = Record.Def->WheelSpec;
+			Extent = FVector(
+				0.5f * Wheel.RadiusM * ExoneerUnits::CmPerM,
+				0.5f * Wheel.WidthM * ExoneerUnits::CmPerM,
+				0.5f * Wheel.RadiusM * ExoneerUnits::CmPerM);
+		}
 
 		UBoxComponent* Box = BlockBodies.FindRef(Record.BlockInstanceId);
 		if (Box)
@@ -1435,11 +1832,55 @@ void AVehicleConstruct::RebuildDerivedState()
 
 		if (Record.Phase == EConstructionPhase::Complete)
 		{
-			CompleteInstances.FindOrAdd(Mesh).Add(LocalTransform);
+			// Complete wheels are excluded: ISMC instances cannot spin or
+			// steer (indices are discarded and rebuilds are wholesale), so
+			// they get dedicated components below. Ghost wheels still render
+			// through the ghost layers.
+			if (!Record.Def->bIsWheel)
+			{
+				CompleteInstances.FindOrAdd(Mesh).Add(LocalTransform);
+			}
 		}
 		else
 		{
 			GhostInstances.FindOrAdd(Mesh).Add(LocalTransform);
+		}
+	}
+
+	// Dedicated animated mesh per Complete wheel (BOTH sides - modules exist
+	// only on the server, so the construct owns these). Pose is re-applied
+	// every frame by UpdateWheelVisuals; creation only sets mesh + attachment.
+	{
+		TSet<int32> LiveWheelIds;
+		for (const FVehicleBlockRecord& Record : BlockList.Blocks)
+		{
+			if (!Record.Def || !Record.Def->bIsWheel || Record.Phase != EConstructionPhase::Complete)
+			{
+				continue;
+			}
+			LiveWheelIds.Add(Record.BlockInstanceId);
+			if (!WheelVisuals.Contains(Record.BlockInstanceId))
+			{
+				UStaticMeshComponent* WheelMesh = NewObject<UStaticMeshComponent>(this);
+				WheelMesh->SetStaticMesh(Record.Def->Mesh.LoadSynchronous());
+				WheelMesh->SetCollisionProfileName(TEXT("NoCollision"));
+				WheelMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+				WheelMesh->RegisterComponent();
+				WheelMesh->AttachToComponent(PhysicsRoot, FAttachmentTransformRules::KeepRelativeTransform);
+				WheelVisuals.Add(Record.BlockInstanceId, WheelMesh);
+			}
+		}
+		for (auto It = WheelVisuals.CreateIterator(); It; ++It)
+		{
+			if (!LiveWheelIds.Contains(It->Key))
+			{
+				if (It->Value)
+				{
+					It->Value->DestroyComponent();
+				}
+				WheelSpinAngles.Remove(It->Key);
+				It.RemoveCurrent();
+			}
 		}
 	}
 
@@ -1642,7 +2083,12 @@ void AVehicleConstruct::RunSplitDetection()
 			for (const int32 Id : Island)
 			{
 				IdsToRemove.Add(Id);
+				if (UVehicleModule* Module = Modules.FindRef(Id))
+				{
+					Module->Shutdown();
+				}
 				Modules.Remove(Id);
+				RemoveWheelStateItem(Id);
 			}
 			continue;
 		}
@@ -1669,7 +2115,23 @@ void AVehicleConstruct::RunSplitDetection()
 			NewConstruct->BlockList.MarkItemDirty(Moved);
 			MaxMovedId = FMath::Max(MaxMovedId, Id);
 			IdsToRemove.Add(Id);
+			if (UVehicleModule* Module = Modules.FindRef(Id))
+			{
+				Module->Shutdown();
+			}
 			Modules.Remove(Id);
+
+			// Wheel side-array state moves with its record; the new construct's
+			// module recreates live physics state but persistent settings (tire
+			// pressure, steer pose) carry over through the moved item.
+			if (const FVehicleWheelStateItem* WheelItem = WheelStates.FindByBlockId(Id))
+			{
+				FVehicleWheelStateItem& MovedItem = NewConstruct->WheelStates.Items.Add_GetRef(*WheelItem);
+				MovedItem.ReplicationID = INDEX_NONE;
+				MovedItem.ReplicationKey = INDEX_NONE;
+				NewConstruct->WheelStates.MarkItemDirty(MovedItem);
+				RemoveWheelStateItem(Id);
+			}
 		}
 		NewConstruct->NextBlockInstanceId = MaxMovedId + 1;
 		NewConstruct->RebuildDerivedState();

@@ -666,10 +666,16 @@ float AVehicleConstruct::InvestConstruction_Implementation(AActor* Builder, UInv
 		// Materials are consumed proportionally across the stage: at progress P
 		// each material owes ceil(Count * P) units. Missing units cap progress
 		// at the threshold they would have crossed (same rule as
-		// UConstructionComponent, spec section 7).
+		// UConstructionComponent, spec section 7). Creative mode waives both
+		// the availability cap and the consumption below.
+		const bool bCreativeWeld = ExoneerCreative::IsEnabled();
 		float ReachableProgress = TargetProgress;
 		for (const FInventoryEntry& Material : Stage.Materials)
 		{
+			if (bCreativeWeld)
+			{
+				break;
+			}
 			UItemDefinitionDataAsset* Item = Material.Item.LoadSynchronous();
 			if (!Item || Material.Count <= 0)
 			{
@@ -693,6 +699,10 @@ float AVehicleConstruct::InvestConstruction_Implementation(AActor* Builder, UInv
 		// Pull the units whose thresholds this advance crosses.
 		for (const FInventoryEntry& Material : Stage.Materials)
 		{
+			if (bCreativeWeld)
+			{
+				break;
+			}
 			UItemDefinitionDataAsset* Item = Material.Item.LoadSynchronous();
 			if (!Item || Material.Count <= 0 || !SourceInventory)
 			{
@@ -801,7 +811,9 @@ float AVehicleConstruct::DeconstructAt_Implementation(AActor* Builder, UInventor
 			}
 			const int32 UnitsCrossed = UnitsOwedAtProgress(Material.Count, StartProgress) - UnitsOwedAtProgress(Material.Count, NewProgress);
 			const int32 RefundUnits = FMath::RoundToInt(UnitsCrossed * RefundMult);
-			if (RefundUnits > 0 && RefundInventory)
+			// Creative welds invested nothing, so creative deconstruction
+			// refunds nothing - otherwise this is an item duplicator.
+			if (RefundUnits > 0 && RefundInventory && !ExoneerCreative::IsEnabled())
 			{
 				RefundInventory->AddItem(Item, RefundUnits); // Overflow is lost.
 			}
@@ -859,9 +871,15 @@ void AVehicleConstruct::SetPilotInput(const FPilotInput& Input)
 		LastProcessedModeToggle = PilotInput.ModeToggleCount;
 		if (Presses % 2 == 1)
 		{
-			ControlMode = ControlMode == EPilotControlMode::Flight
-				? EPilotControlMode::Ground
-				: EPilotControlMode::Flight;
+			// Never strand the pilot in a mode the hardware cannot use: a
+			// thruster-less rover has nothing to actuate in Flight (and the
+			// mouse stops being a camera), a wheel-less flyer nothing in
+			// Ground. The toggle only lands on a mode with matching blocks.
+			const bool bWantGround = ControlMode == EPilotControlMode::Flight;
+			if (bWantGround ? HasCompleteWheel() : HasCompleteThruster())
+			{
+				ControlMode = bWantGround ? EPilotControlMode::Ground : EPilotControlMode::Flight;
+			}
 		}
 	}
 }
@@ -901,6 +919,19 @@ bool AVehicleConstruct::EnterPilot_Implementation(APawn* Pilot, int32 StationId)
 	bModeToggleSyncPending = true;
 	PilotInput = FPilotInput();
 	LastPilotInputServerTime = -1.0;
+
+	// Board in a mode the craft can actually use. Hybrids keep whatever the
+	// pilot last chose; single-capability craft snap to their only option.
+	const bool bCanDrive = HasCompleteWheel();
+	const bool bCanFly = HasCompleteThruster();
+	if (bCanDrive && !bCanFly)
+	{
+		ControlMode = EPilotControlMode::Ground;
+	}
+	else if (bCanFly && !bCanDrive)
+	{
+		ControlMode = EPilotControlMode::Flight;
+	}
 
 	// Seat the pawn: attach to the root, then snap to the cockpit block. The
 	// character's own movement simulation and capsule collision must sleep
@@ -1632,6 +1663,8 @@ FVehicleDrivetrainSummary AVehicleConstruct::GetDrivetrainSummary() const
 	FVehicleDrivetrainSummary Summary;
 	Summary.SpeedMS = GetVelocity().Size() / ExoneerUnits::CmPerM;
 	Summary.bParkingBrake = bParkingBrakeEngaged;
+	Summary.bCanDrive = HasCompleteWheel();
+	Summary.bCanFly = HasCompleteThruster();
 	bool bFirst = true;
 	for (const FVehicleWheelStateItem& Item : WheelStates.Items)
 	{
@@ -1655,6 +1688,19 @@ bool AVehicleConstruct::HasCompleteWheel() const
 	for (const FVehicleBlockRecord& Record : BlockList.Blocks)
 	{
 		if (Record.Phase == EConstructionPhase::Complete && Record.Def && Record.Def->bIsWheel)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+bool AVehicleConstruct::HasCompleteThruster() const
+{
+	for (const FVehicleBlockRecord& Record : BlockList.Blocks)
+	{
+		if (Record.Phase == EConstructionPhase::Complete && Record.Def && Record.Def->ModuleClass
+			&& Record.Def->ModuleClass->IsChildOf(UThrusterModule::StaticClass()))
 		{
 			return true;
 		}

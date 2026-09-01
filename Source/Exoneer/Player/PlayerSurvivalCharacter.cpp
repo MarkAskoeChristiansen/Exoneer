@@ -39,10 +39,13 @@ APlayerSurvivalCharacter::APlayerSurvivalCharacter()
 		CMC->MaxWalkSpeed = WalkSpeed;
 		CMC->JumpZVelocity = JumpHeight;
 		CMC->AirControl = 0.5f;
-		// Default push force launches light constructs across the map when
-		// the engineer brushes against them; scale it to mass and calm it.
-		CMC->PushForceFactor = 80000.f;
-		CMC->bPushForceScaledToMass = true;
+		// A walking engineer is a ~2 kN shove, full stop. The old value
+		// (80000 SCALED TO MASS) applied ~80 g to anything touched - it
+		// launched a 1.6 t rover into the air on contact. Unscaled, the same
+		// fixed force barely rolls a heavy vehicle (F/m) and still nudges
+		// small debris, which is the physical outcome.
+		CMC->PushForceFactor = 200000.f;   // kg*cm/s^2 = 2 kN
+		CMC->bPushForceScaledToMass = false;
 		CMC->bScalePushForceToVelocity = true;
 	}
 

@@ -218,6 +218,10 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Vehicle")
 	bool HasCompleteWheel() const;
 
+	/** Any Complete block whose module is a thruster (the craft can fly). */
+	UFUNCTION(BlueprintPure, Category = "Vehicle")
+	bool HasCompleteThruster() const;
+
 	/** Persistent per-wheel settings queued by the save-load path until the module spawns. */
 	struct FWheelSavedState
 	{

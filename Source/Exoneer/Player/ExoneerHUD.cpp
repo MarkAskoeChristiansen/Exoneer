@@ -107,7 +107,14 @@ void AExoneerHUD::DrawPilotPanel(const APlayerSurvivalCharacter* Engineer)
 	Y += 16.f;
 
 	const bool bGround = Construct->GetControlMode() == EPilotControlMode::Ground;
-	DrawReadout(X, Y, TEXT("MODE"), bGround ? TEXT("GROUND (V)") : TEXT("FLIGHT (V)"), VisorMain);
+	// The V hint only appears when the craft has both wheels and thrusters -
+	// a single-capability vehicle cannot leave its mode.
+	FString ModeValue = bGround ? TEXT("GROUND") : TEXT("FLIGHT");
+	if (Drivetrain.bCanDrive && Drivetrain.bCanFly)
+	{
+		ModeValue += TEXT(" (V)");
+	}
+	DrawReadout(X, Y, TEXT("MODE"), ModeValue, VisorMain);
 	DrawReadout(X, Y, TEXT("SPEED"), FString::Printf(TEXT("%.1f m/s"), SmoothedSpeedMS), VisorMain);
 
 	const float SupplyPct = Construct->PowerSupplyFraction * 100.f;

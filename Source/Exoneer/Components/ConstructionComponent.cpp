@@ -156,6 +156,12 @@ float UConstructionComponent::InvestWork(UInventoryComponent* Source, float Weld
 
 		for (const FPendingUnit& Unit : Pending)
 		{
+			// Creative: every unit is satisfied without consuming and without
+			// entering the invested ledger (so later refunds grant nothing).
+			if (ExoneerCreative::IsEnabled())
+			{
+				continue;
+			}
 			if (Source && Source->RemoveItem(Unit.Item, 1) == 1)
 			{
 				AddInvestedUnit(Unit.Item);

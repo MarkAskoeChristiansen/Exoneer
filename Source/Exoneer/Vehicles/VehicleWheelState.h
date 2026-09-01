@@ -90,4 +90,6 @@ struct FVehicleDrivetrainSummary
 	UPROPERTY(BlueprintReadOnly, Category = "Vehicle") int32 WheelCount = 0;
 	UPROPERTY(BlueprintReadOnly, Category = "Vehicle") int32 WheelsInContact = 0;
 	UPROPERTY(BlueprintReadOnly, Category = "Vehicle") bool bParkingBrake = false;
+	UPROPERTY(BlueprintReadOnly, Category = "Vehicle") bool bCanDrive = false;
+	UPROPERTY(BlueprintReadOnly, Category = "Vehicle") bool bCanFly = false;
 };

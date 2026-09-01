@@ -11,9 +11,12 @@ class UItemDefinitionDataAsset;
 /**
  * Lets a machine pull items from, or push items to, connected inventories.
  *
- * In the prototype, "connected" simply means "any cargo inventory within
+ * In the prototype, "connected" simply means "any inventory within
  * ConnectionRange of the owning actor". A future expansion would walk the
- * connection-point graph of placed conveyor blocks for true network logic.
+ * socket graph of placed conveyor pieces for true network logic.
+ *
+ * SERVER-ONLY: both transfer calls mutate inventories and therefore run only
+ * on authority (they log and return 0 on clients).
  */
 UCLASS(ClassGroup = (Exoneer), meta = (BlueprintSpawnableComponent))
 class EXONEER_API UConveyorComponent : public UActorComponent
@@ -25,14 +28,16 @@ public:
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Conveyor") float ConnectionRange = 600.f;
 
-	/** Pull up to Count of Item from any connected inventory into Destination. Returns pulled. */
+	/** SERVER. Pull up to Count of Item from any connected inventory into Destination. Returns pulled. */
 	UFUNCTION(BlueprintCallable, Category = "Conveyor")
 	int32 PullInto(UInventoryComponent* Destination, UItemDefinitionDataAsset* Item, int32 Count);
 
-	/** Push up to Count of Item from Source into any connected inventory. Returns pushed. */
+	/** SERVER. Push up to Count of Item from Source into any connected inventory. Returns pushed. */
 	UFUNCTION(BlueprintCallable, Category = "Conveyor")
 	int32 PushFrom(UInventoryComponent* Source, UItemDefinitionDataAsset* Item, int32 Count);
 
 protected:
 	void GatherNearbyInventories(TArray<UInventoryComponent*>& OutInventories) const;
+
+	bool HasAuthority() const;
 };

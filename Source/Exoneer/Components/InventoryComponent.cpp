@@ -1,13 +1,64 @@
 // Copyright Exoneer contributors.
 #include "Components/InventoryComponent.h"
+#include "Exoneer.h"
 #include "Data/ItemDefinitionDataAsset.h"
+#include "GameFramework/Pawn.h"
+#include "Net/UnrealNetwork.h"
+
+// --- Fast array client callbacks -------------------------------------------
+// The per-item callbacks stay silent: PreReplicatedRemove runs BEFORE the
+// stack leaves the array, so broadcasting there hands the UI deleted stacks.
+// PostReplicatedReceive fires once per delta batch after everything applied.
+
+void FInventoryStack::PreReplicatedRemove(const FInventoryList& InArray)
+{
+}
+
+void FInventoryStack::PostReplicatedAdd(const FInventoryList& InArray)
+{
+}
+
+void FInventoryStack::PostReplicatedChange(const FInventoryList& InArray)
+{
+}
+
+void FInventoryList::PostReplicatedReceive(const FFastArraySerializer::FPostReplicatedReceiveParameters& Parameters)
+{
+	BroadcastChanged();
+}
+
+void FInventoryList::BroadcastChanged() const
+{
+	if (OwnerComponent)
+	{
+		OwnerComponent->OnInventoryChanged.Broadcast();
+	}
+}
+
+// --- Component --------------------------------------------------------------
 
 UInventoryComponent::UInventoryComponent()
 {
 	PrimaryComponentTick.bCanEverTick = false;
+	SetIsReplicatedByDefault(true);
+	List.OwnerComponent = this;
 }
 
-float UInventoryComponent::GetUnitFootprint(UItemDefinitionDataAsset* Item) const
+void UInventoryComponent::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
+{
+	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
+	DOREPLIFETIME(UInventoryComponent, List);
+	DOREPLIFETIME(UInventoryComponent, MaxCapacity);
+	DOREPLIFETIME(UInventoryComponent, bUseWeight);
+}
+
+bool UInventoryComponent::HasAuthority() const
+{
+	const AActor* Owner = GetOwner();
+	return Owner && Owner->HasAuthority();
+}
+
+float UInventoryComponent::GetUnitFootprint(const UItemDefinitionDataAsset* Item) const
 {
 	if (!Item) return 0.f;
 	return bUseWeight ? Item->Mass : Item->Volume;
@@ -16,10 +67,9 @@ float UInventoryComponent::GetUnitFootprint(UItemDefinitionDataAsset* Item) cons
 float UInventoryComponent::GetCurrentLoad() const
 {
 	float Total = 0.f;
-	for (const FInventoryEntry& E : Entries)
+	for (const FInventoryStack& Stack : List.Stacks)
 	{
-		UItemDefinitionDataAsset* I = E.Item.LoadSynchronous();
-		Total += GetUnitFootprint(I) * E.Count;
+		Total += GetUnitFootprint(Stack.Item) * Stack.Count;
 	}
 	return Total;
 }
@@ -33,10 +83,17 @@ int32 UInventoryComponent::AddItem(UItemDefinitionDataAsset* Item, int32 Count)
 {
 	if (!Item || Count <= 0) return Count;
 
-	const float UnitFootprint = GetUnitFootprint(Item);
+	if (!HasAuthority())
+	{
+		UE_LOG(LogExoneer, Warning, TEXT("AddItem(%s x%d) called without authority on %s; ignored."),
+			*Item->ItemId.ToString(), Count, *GetNameSafe(GetOwner()));
+		return Count;
+	}
+
 	int32 Remaining = Count;
 
-	// Capacity check.
+	// Capacity check: only whole units fit under the weight/volume budget.
+	const float UnitFootprint = GetUnitFootprint(Item);
 	if (MaxCapacity > 0.f && UnitFootprint > 0.f)
 	{
 		const float Free = FMath::Max(0.f, MaxCapacity - GetCurrentLoad());
@@ -46,26 +103,32 @@ int32 UInventoryComponent::AddItem(UItemDefinitionDataAsset* Item, int32 Count)
 	}
 
 	const int32 Granted = Remaining;
+	const int32 MaxStack = FMath::Max(1, Item->MaxStack);
 
 	// Fill existing stacks first.
-	for (FInventoryEntry& E : Entries)
+	for (FInventoryStack& Stack : List.Stacks)
 	{
 		if (Remaining <= 0) break;
-		if (E.Item == Item)
+		if (Stack.Item != Item) continue;
+
+		const int32 SpaceInStack = FMath::Max(0, MaxStack - Stack.Count);
+		const int32 ToAdd = FMath::Min(SpaceInStack, Remaining);
+		if (ToAdd > 0)
 		{
-			const int32 SpaceInStack = FMath::Max(0, Item->MaxStack - E.Count);
-			const int32 ToAdd = FMath::Min(SpaceInStack, Remaining);
-			E.Count += ToAdd;
+			Stack.Count += ToAdd;
 			Remaining -= ToAdd;
+			List.MarkItemDirty(Stack);
 		}
 	}
 
-	// Create new stacks.
+	// Open new stacks for the rest.
 	while (Remaining > 0)
 	{
-		const int32 ToAdd = FMath::Min(Item->MaxStack, Remaining);
-		Entries.Add({ Item, ToAdd });
-		Remaining -= ToAdd;
+		FInventoryStack& NewStack = List.Stacks.AddDefaulted_GetRef();
+		NewStack.Item = Item;
+		NewStack.Count = FMath::Min(MaxStack, Remaining);
+		Remaining -= NewStack.Count;
+		List.MarkItemDirty(NewStack);
 	}
 
 	if (Granted > 0)
@@ -78,21 +141,39 @@ int32 UInventoryComponent::AddItem(UItemDefinitionDataAsset* Item, int32 Count)
 int32 UInventoryComponent::RemoveItem(UItemDefinitionDataAsset* Item, int32 Count)
 {
 	if (!Item || Count <= 0) return 0;
-	int32 Remaining = Count;
 
-	for (int32 i = Entries.Num() - 1; i >= 0 && Remaining > 0; --i)
+	if (!HasAuthority())
 	{
-		FInventoryEntry& E = Entries[i];
-		if (E.Item == Item)
+		UE_LOG(LogExoneer, Warning, TEXT("RemoveItem(%s x%d) called without authority on %s; ignored."),
+			*Item->ItemId.ToString(), Count, *GetNameSafe(GetOwner()));
+		return 0;
+	}
+
+	int32 Remaining = Count;
+	bool bRemovedStacks = false;
+
+	for (int32 i = List.Stacks.Num() - 1; i >= 0 && Remaining > 0; --i)
+	{
+		FInventoryStack& Stack = List.Stacks[i];
+		if (Stack.Item != Item) continue;
+
+		const int32 Taken = FMath::Min(Stack.Count, Remaining);
+		Stack.Count -= Taken;
+		Remaining -= Taken;
+		if (Stack.Count <= 0)
 		{
-			const int32 Taken = FMath::Min(E.Count, Remaining);
-			E.Count -= Taken;
-			Remaining -= Taken;
-			if (E.Count <= 0)
-			{
-				Entries.RemoveAt(i);
-			}
+			List.Stacks.RemoveAt(i);
+			bRemovedStacks = true;
 		}
+		else
+		{
+			List.MarkItemDirty(Stack);
+		}
+	}
+
+	if (bRemovedStacks)
+	{
+		List.MarkArrayDirty();
 	}
 
 	const int32 Removed = Count - Remaining;
@@ -103,13 +184,31 @@ int32 UInventoryComponent::RemoveItem(UItemDefinitionDataAsset* Item, int32 Coun
 	return Removed;
 }
 
+bool UInventoryComponent::ConsumeItems(const TArray<FInventoryEntry>& Required)
+{
+	if (!HasAuthority())
+	{
+		UE_LOG(LogExoneer, Warning, TEXT("ConsumeItems called without authority on %s; ignored."),
+			*GetNameSafe(GetOwner()));
+		return false;
+	}
+
+	if (!HasItems(Required)) return false;
+
+	for (const FInventoryEntry& Req : Required)
+	{
+		RemoveItem(Req.Item.LoadSynchronous(), Req.Count);
+	}
+	return true;
+}
+
 int32 UInventoryComponent::GetItemCount(UItemDefinitionDataAsset* Item) const
 {
 	if (!Item) return 0;
 	int32 Total = 0;
-	for (const FInventoryEntry& E : Entries)
+	for (const FInventoryStack& Stack : List.Stacks)
 	{
-		if (E.Item == Item) Total += E.Count;
+		if (Stack.Item == Item) Total += Stack.Count;
 	}
 	return Total;
 }
@@ -123,12 +222,83 @@ bool UInventoryComponent::HasItems(const TArray<FInventoryEntry>& Required) cons
 	return true;
 }
 
-bool UInventoryComponent::ConsumeItems(const TArray<FInventoryEntry>& Required)
+TArray<FInventoryEntry> UInventoryComponent::GetEntries() const
 {
-	if (!HasItems(Required)) return false;
-	for (const FInventoryEntry& Req : Required)
+	TArray<FInventoryEntry> Entries;
+	Entries.Reserve(List.Stacks.Num());
+	for (const FInventoryStack& Stack : List.Stacks)
 	{
-		RemoveItem(Req.Item.LoadSynchronous(), Req.Count);
+		if (!Stack.Item || Stack.Count <= 0) continue;
+
+		FInventoryEntry& Entry = Entries.AddDefaulted_GetRef();
+		Entry.Item = Stack.Item.Get();
+		Entry.Count = Stack.Count;
 	}
-	return true;
+	return Entries;
+}
+
+// --- Container transfer ------------------------------------------------------
+
+void UInventoryComponent::RequestTransfer(UInventoryComponent* Source, UInventoryComponent* Target, UItemDefinitionDataAsset* Item, int32 Count)
+{
+	if (!Source || !Target || !Item || Count <= 0 || Source == Target) return;
+
+	if (HasAuthority())
+	{
+		ExecuteTransfer(Source, Target, Item, Count);
+		return;
+	}
+
+	// Client intent must ride this connection's own pawn (spec section 3).
+	const APawn* Pawn = Cast<APawn>(GetOwner());
+	if (!Pawn || !Pawn->IsLocallyControlled())
+	{
+		UE_LOG(LogExoneer, Warning, TEXT("RequestTransfer must be called on the local player's own InventoryComponent (owner: %s)."),
+			*GetNameSafe(GetOwner()));
+		return;
+	}
+
+	Server_RequestTransfer(Source, Target, Item, Count);
+}
+
+bool UInventoryComponent::Server_RequestTransfer_Validate(UInventoryComponent* Source, UInventoryComponent* Target, UItemDefinitionDataAsset* Item, int32 Count)
+{
+	// An honest client never sends a non-positive count. Object references can
+	// legitimately fail to resolve under relevancy, so nulls soft-fail in the
+	// implementation instead of disconnecting the sender.
+	return Count > 0;
+}
+
+void UInventoryComponent::Server_RequestTransfer_Implementation(UInventoryComponent* Source, UInventoryComponent* Target, UItemDefinitionDataAsset* Item, int32 Count)
+{
+	if (!Source || !Target || !Item || Count <= 0) return;
+
+	const APawn* Pawn = Cast<APawn>(GetOwner());
+	const AActor* SourceOwner = Source->GetOwner();
+	const AActor* TargetOwner = Target->GetOwner();
+	if (!Pawn || !SourceOwner || !TargetOwner) return;
+
+	// The requesting pawn must be within reach of BOTH containers.
+	const FVector PawnLocation = Pawn->GetActorLocation();
+	if (FVector::Dist(PawnLocation, SourceOwner->GetActorLocation()) > TransferReach ||
+		FVector::Dist(PawnLocation, TargetOwner->GetActorLocation()) > TransferReach)
+	{
+		UE_LOG(LogExoneer, Verbose, TEXT("Transfer rejected: %s is out of reach of a container."), *GetNameSafe(Pawn));
+		return;
+	}
+
+	ExecuteTransfer(Source, Target, Item, Count);
+}
+
+void UInventoryComponent::ExecuteTransfer(UInventoryComponent* Source, UInventoryComponent* Target, UItemDefinitionDataAsset* Item, int32 Count)
+{
+	const int32 Removed = Source->RemoveItem(Item, Count);
+	if (Removed <= 0) return;
+
+	// Whatever does not fit in the target goes straight back where it came from.
+	const int32 Leftover = Target->AddItem(Item, Removed);
+	if (Leftover > 0)
+	{
+		Source->AddItem(Item, Leftover);
+	}
 }

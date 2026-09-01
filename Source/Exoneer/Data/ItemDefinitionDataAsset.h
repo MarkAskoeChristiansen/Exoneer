@@ -60,9 +60,13 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Item")
 	TSoftObjectPtr<UTexture2D> Icon;
 
-	/** If this item, when wielded or placed, corresponds to a block. */
+	/** If this item corresponds to a placeable base piece (build menu links). */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Item")
-	TSoftObjectPtr<class UBlockDefinitionDataAsset> AssociatedBlock;
+	TSoftObjectPtr<class UPieceDefinitionDataAsset> AssociatedPiece;
+
+	/** If this item corresponds to a placeable vehicle block. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Item")
+	TSoftObjectPtr<class UVehicleBlockDefinitionDataAsset> AssociatedVehicleBlock;
 
 	virtual FPrimaryAssetId GetPrimaryAssetId() const override
 	{

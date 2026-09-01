@@ -8,6 +8,11 @@ public class Exoneer : ModuleRules
 	{
 		PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
 
+		// The module has no Public/Private split; all includes are module-root
+		// relative ("Components/X.h"). Modern build settings no longer add the
+		// module directory implicitly, so do it explicitly.
+		PrivateIncludePaths.Add(ModuleDirectory);
+
 		PublicDependencyModuleNames.AddRange(new string[]
 		{
 			"Core",
@@ -18,10 +23,10 @@ public class Exoneer : ModuleRules
 			"UMG",
 			"Slate",
 			"SlateCore",
-			"CommonUI",
 			"PhysicsCore",
 			"ChaosVehicles",
 			"GameplayTags",
+			"NetCore",
 			"AIModule",
 			"NavigationSystem"
 		});

@@ -9,6 +9,12 @@ UConveyorComponent::UConveyorComponent()
 	PrimaryComponentTick.bCanEverTick = false;
 }
 
+bool UConveyorComponent::HasAuthority() const
+{
+	const AActor* Owner = GetOwner();
+	return Owner && Owner->HasAuthority();
+}
+
 void UConveyorComponent::GatherNearbyInventories(TArray<UInventoryComponent*>& OutInventories) const
 {
 	const AActor* Self = GetOwner();
@@ -37,7 +43,13 @@ void UConveyorComponent::GatherNearbyInventories(TArray<UInventoryComponent*>& O
 
 int32 UConveyorComponent::PullInto(UInventoryComponent* Destination, UItemDefinitionDataAsset* Item, int32 Count)
 {
+	if (!HasAuthority())
+	{
+		UE_LOG(LogTemp, Warning, TEXT("UConveyorComponent::PullInto called without authority; ignored."));
+		return 0;
+	}
 	if (!Destination || !Item || Count <= 0) return 0;
+
 	TArray<UInventoryComponent*> Sources;
 	GatherNearbyInventories(Sources);
 
@@ -58,7 +70,13 @@ int32 UConveyorComponent::PullInto(UInventoryComponent* Destination, UItemDefini
 
 int32 UConveyorComponent::PushFrom(UInventoryComponent* Source, UItemDefinitionDataAsset* Item, int32 Count)
 {
+	if (!HasAuthority())
+	{
+		UE_LOG(LogTemp, Warning, TEXT("UConveyorComponent::PushFrom called without authority; ignored."));
+		return 0;
+	}
 	if (!Source || !Item || Count <= 0) return 0;
+
 	TArray<UInventoryComponent*> Dests;
 	GatherNearbyInventories(Dests);
 

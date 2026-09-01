@@ -8,12 +8,19 @@
 #include "Components/MiningToolComponent.h"
 #include "Components/BuildToolComponent.h"
 #include "Components/CapsuleComponent.h"
+#include "Data/ItemDefinitionDataAsset.h"
+#include "Data/PieceDefinitionDataAsset.h"
+#include "Data/VehicleBlockDefinitionDataAsset.h"
+#include "Engine/Engine.h"
 #include "GameFramework/CharacterMovementComponent.h"
+#include "Vehicles/VehicleConstruct.h"
+#include "Interfaces/Pilotable.h"
 #include "EnhancedInputComponent.h"
 #include "EnhancedInputSubsystems.h"
 #include "InputAction.h"
 #include "InputMappingContext.h"
 #include "InputActionValue.h"
+#include "Net/UnrealNetwork.h"
 #include "Exoneer.h"
 
 APlayerSurvivalCharacter::APlayerSurvivalCharacter()
@@ -32,6 +39,11 @@ APlayerSurvivalCharacter::APlayerSurvivalCharacter()
 		CMC->MaxWalkSpeed = WalkSpeed;
 		CMC->JumpZVelocity = JumpHeight;
 		CMC->AirControl = 0.5f;
+		// Default push force launches light constructs across the map when
+		// the engineer brushes against them; scale it to mass and calm it.
+		CMC->PushForceFactor = 80000.f;
+		CMC->bPushForceScaledToMass = true;
+		CMC->bScalePushForceToVelocity = true;
 	}
 
 	Inventory     = CreateDefaultSubobject<UInventoryComponent>(TEXT("Inventory"));
@@ -49,6 +61,18 @@ void APlayerSurvivalCharacter::BeginPlay()
 {
 	Super::BeginPlay();
 
+	// Prototype bootstrap: grant the starter kit once, server-side.
+	if (HasAuthority() && Inventory)
+	{
+		for (const FInventoryEntry& Entry : StarterItems)
+		{
+			if (UItemDefinitionDataAsset* Item = Entry.Item.LoadSynchronous())
+			{
+				Inventory->AddItem(Item, Entry.Count);
+			}
+		}
+	}
+
 	if (APlayerController* PC = Cast<APlayerController>(GetController()))
 	{
 		if (UEnhancedInputLocalPlayerSubsystem* Subsystem =
@@ -62,9 +86,52 @@ void APlayerSurvivalCharacter::BeginPlay()
 	}
 }
 
+void APlayerSurvivalCharacter::Tick(float DeltaSeconds)
+{
+	Super::Tick(DeltaSeconds);
+
+	// While seated, ship the accumulated pilot intent at ~PilotInputSendHz.
+	// A steady stream (zero vectors included) lets the construct stop cleanly
+	// when keys are released; the RPC is unreliable, the next send supersedes.
+	if (PilotedConstruct && IsLocallyControlled())
+	{
+		PilotSendAccumulator += DeltaSeconds;
+		const float SendInterval = 1.f / FMath::Max(PilotInputSendHz, 1.f);
+		if (PilotSendAccumulator >= SendInterval)
+		{
+			PilotSendAccumulator = 0.f;
+			Server_SendPilotInput(PilotedConstruct, PendingPilotMove, PendingPilotRotate);
+			PendingPilotMove = FVector::ZeroVector;
+			PendingPilotRotate = FVector::ZeroVector;
+		}
+	}
+}
+
+void APlayerSurvivalCharacter::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
+{
+	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
+	DOREPLIFETIME(APlayerSurvivalCharacter, PilotedConstruct);
+}
+
 void APlayerSurvivalCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
 {
 	Super::SetupPlayerInputComponent(PlayerInputComponent);
+
+	// Register the mapping context HERE, not only in BeginPlay: on the first
+	// possession the pawn's BeginPlay can run before the controller is set,
+	// in which case the BeginPlay registration silently does nothing and
+	// every key stays dead. This path always has a controller.
+	if (APlayerController* PC = Cast<APlayerController>(GetController()))
+	{
+		if (UEnhancedInputLocalPlayerSubsystem* Subsystem =
+			ULocalPlayer::GetSubsystem<UEnhancedInputLocalPlayerSubsystem>(PC->GetLocalPlayer()))
+		{
+			if (DefaultMappingContext && !Subsystem->HasMappingContext(DefaultMappingContext))
+			{
+				Subsystem->AddMappingContext(DefaultMappingContext, 0);
+			}
+		}
+	}
 
 	UEnhancedInputComponent* EIC = Cast<UEnhancedInputComponent>(PlayerInputComponent);
 	if (!EIC) return;
@@ -74,28 +141,39 @@ void APlayerSurvivalCharacter::SetupPlayerInputComponent(UInputComponent* Player
 		if (IA) EIC->BindAction(IA, E, this, Fn);
 	};
 
+	// Continuous inputs stay on Triggered (fires every frame while held);
+	// one-shot actions use Started, or holding the key repeats them per tick
+	// (holding B used to machine-gun through the whole quick bar).
 	Bind(IA_Move,             ETriggerEvent::Triggered,  &APlayerSurvivalCharacter::Input_Move);
 	Bind(IA_Look,             ETriggerEvent::Triggered,  &APlayerSurvivalCharacter::Input_Look);
-	Bind(IA_Jump,             ETriggerEvent::Triggered,  &APlayerSurvivalCharacter::Input_Jump);
+	Bind(IA_Jump,             ETriggerEvent::Triggered,  &APlayerSurvivalCharacter::Input_Jump);   // held = pilot up-thrust
 	Bind(IA_Sprint,           ETriggerEvent::Started,    &APlayerSurvivalCharacter::Input_SprintStart);
 	Bind(IA_Sprint,           ETriggerEvent::Completed,  &APlayerSurvivalCharacter::Input_SprintStop);
-	Bind(IA_Crouch,           ETriggerEvent::Triggered,  &APlayerSurvivalCharacter::Input_CrouchToggle);
-	Bind(IA_Interact,         ETriggerEvent::Triggered,  &APlayerSurvivalCharacter::Input_Interact);
+	Bind(IA_Crouch,           ETriggerEvent::Started,    &APlayerSurvivalCharacter::Input_CrouchToggle);
+	Bind(IA_Interact,         ETriggerEvent::Started,    &APlayerSurvivalCharacter::Input_Interact);
 	Bind(IA_PrimaryAction,    ETriggerEvent::Started,    &APlayerSurvivalCharacter::Input_PrimaryStart);
 	Bind(IA_PrimaryAction,    ETriggerEvent::Completed,  &APlayerSurvivalCharacter::Input_PrimaryStop);
-	Bind(IA_SecondaryAction,  ETriggerEvent::Triggered,  &APlayerSurvivalCharacter::Input_SecondaryStart);
-	Bind(IA_OpenInventory,    ETriggerEvent::Triggered,  &APlayerSurvivalCharacter::Input_OpenInventory);
-	Bind(IA_OpenBuildMenu,    ETriggerEvent::Triggered,  &APlayerSurvivalCharacter::Input_OpenBuildMenu);
-	Bind(IA_RotateBlock,      ETriggerEvent::Triggered,  &APlayerSurvivalCharacter::Input_RotateBlock);
-	Bind(IA_ConfirmPlace,     ETriggerEvent::Triggered,  &APlayerSurvivalCharacter::Input_ConfirmPlace);
-	Bind(IA_CancelPlace,      ETriggerEvent::Triggered,  &APlayerSurvivalCharacter::Input_CancelPlace);
-	Bind(IA_ToggleTool,       ETriggerEvent::Triggered,  &APlayerSurvivalCharacter::Input_ToggleTool);
-	Bind(IA_EnterExitCockpit, ETriggerEvent::Triggered,  &APlayerSurvivalCharacter::Input_EnterExitCockpit);
+	Bind(IA_SecondaryAction,  ETriggerEvent::Started,    &APlayerSurvivalCharacter::Input_SecondaryStart);
+	Bind(IA_SecondaryAction,  ETriggerEvent::Completed,  &APlayerSurvivalCharacter::Input_SecondaryStop);
+	Bind(IA_OpenInventory,    ETriggerEvent::Started,    &APlayerSurvivalCharacter::Input_OpenInventory);
+	Bind(IA_OpenBuildMenu,    ETriggerEvent::Started,    &APlayerSurvivalCharacter::Input_OpenBuildMenu);
+	Bind(IA_RotateBlock,      ETriggerEvent::Started,    &APlayerSurvivalCharacter::Input_RotateBlock);
+	Bind(IA_ConfirmPlace,     ETriggerEvent::Started,    &APlayerSurvivalCharacter::Input_ConfirmPlace);
+	Bind(IA_CancelPlace,      ETriggerEvent::Started,    &APlayerSurvivalCharacter::Input_CancelPlace);
+	Bind(IA_ToggleTool,       ETriggerEvent::Started,    &APlayerSurvivalCharacter::Input_ToggleTool);
+	Bind(IA_EnterExitCockpit, ETriggerEvent::Started,    &APlayerSurvivalCharacter::Input_EnterExitCockpit);
 }
 
 void APlayerSurvivalCharacter::Input_Move(const FInputActionValue& Value)
 {
 	const FVector2D Axis = Value.Get<FVector2D>();
+	if (PilotedConstruct)
+	{
+		// Pilot frame: X forward, Y right; Z comes from jump (thrust up).
+		PendingPilotMove.X = Axis.Y;
+		PendingPilotMove.Y = Axis.X;
+		return;
+	}
 	if (!Controller) return;
 	const FRotator YawRot(0.f, Controller->GetControlRotation().Yaw, 0.f);
 	const FVector Fwd = FRotationMatrix(YawRot).GetUnitAxis(EAxis::X);
@@ -107,12 +185,24 @@ void APlayerSurvivalCharacter::Input_Move(const FInputActionValue& Value)
 void APlayerSurvivalCharacter::Input_Look(const FInputActionValue& Value)
 {
 	const FVector2D Axis = Value.Get<FVector2D>();
+	if (PilotedConstruct)
+	{
+		// Rotate intent as (pitch, yaw, roll); the camera stays seat-locked.
+		PendingPilotRotate.X = -Axis.Y;
+		PendingPilotRotate.Y = Axis.X;
+		return;
+	}
 	AddControllerYawInput(Axis.X);
 	AddControllerPitchInput(-Axis.Y);
 }
 
 void APlayerSurvivalCharacter::Input_Jump(const FInputActionValue&)
 {
+	if (PilotedConstruct)
+	{
+		PendingPilotMove.Z = 1.f;
+		return;
+	}
 	Jump();
 }
 
@@ -128,6 +218,7 @@ void APlayerSurvivalCharacter::Input_SprintStop(const FInputActionValue&)
 
 void APlayerSurvivalCharacter::Input_CrouchToggle(const FInputActionValue&)
 {
+	if (PilotedConstruct) return;
 	if (bIsCrouched) UnCrouch(); else Crouch();
 }
 
@@ -138,26 +229,34 @@ void APlayerSurvivalCharacter::Input_Interact(const FInputActionValue&)
 
 void APlayerSurvivalCharacter::Input_PrimaryStart(const FInputActionValue&)
 {
+	if (PilotedConstruct) return;   // Tools stay holstered while seated.
 	switch (ToolMode)
 	{
-	case EPlayerToolMode::Mining: if (MiningTool) MiningTool->SetActive(true); break;
+	case EPlayerToolMode::Mining: if (MiningTool) MiningTool->SetMiningActive(true); break;
 	case EPlayerToolMode::Build:  if (BuildTool)  BuildTool->TryConfirmPlacement(); break;
-	case EPlayerToolMode::Repair: if (BuildTool)  BuildTool->TryRepairTargetedBlock(20.f); break;
+	case EPlayerToolMode::Weld:   if (BuildTool)  BuildTool->SetWeldActive(true); break;
 	default: break;
 	}
 }
 
 void APlayerSurvivalCharacter::Input_PrimaryStop(const FInputActionValue&)
 {
-	if (MiningTool) MiningTool->SetActive(false);
+	if (MiningTool) MiningTool->SetMiningActive(false);
+	if (BuildTool)  BuildTool->SetWeldActive(false);
 }
 
 void APlayerSurvivalCharacter::Input_SecondaryStart(const FInputActionValue&)
 {
-	if (ToolMode == EPlayerToolMode::Build && BuildTool)
+	if (PilotedConstruct) return;
+	if ((ToolMode == EPlayerToolMode::Build || ToolMode == EPlayerToolMode::Weld) && BuildTool)
 	{
-		BuildTool->TryRemoveTargetedBlock();
+		BuildTool->SetDeconstructActive(true);
 	}
+}
+
+void APlayerSurvivalCharacter::Input_SecondaryStop(const FInputActionValue&)
+{
+	if (BuildTool) BuildTool->SetDeconstructActive(false);
 }
 
 void APlayerSurvivalCharacter::Input_OpenInventory(const FInputActionValue&)
@@ -167,22 +266,49 @@ void APlayerSurvivalCharacter::Input_OpenInventory(const FInputActionValue&)
 
 void APlayerSurvivalCharacter::Input_OpenBuildMenu(const FInputActionValue&)
 {
+	// Debug quick bar: until the diegetic UI stack exists, the build-menu key
+	// cycles the QuickBar selection and arms the build tool directly.
+	if (QuickBar.Num() > 0 && BuildTool)
+	{
+		QuickBarIndex = (QuickBarIndex + 1) % QuickBar.Num();
+		UPrimaryDataAsset* Selected = QuickBar[QuickBarIndex];
+		FString Label = TEXT("(empty)");
+		if (UPieceDefinitionDataAsset* Piece = Cast<UPieceDefinitionDataAsset>(Selected))
+		{
+			SetSelectedPiece(Piece);
+			Label = Piece->DisplayName.ToString();
+		}
+		else if (UVehicleBlockDefinitionDataAsset* Block = Cast<UVehicleBlockDefinitionDataAsset>(Selected))
+		{
+			SetSelectedVehicleBlock(Block);
+			Label = Block->DisplayName.ToString();
+		}
+		BuildTool->SetBuildModeEnabled(true);
+		ToolMode = EPlayerToolMode::Build;
+		(void)Label;   // The visor HUD renders the quick bar and selection now.
+	}
 	RequestOpenBuildMenuUI();
 }
 
 void APlayerSurvivalCharacter::Input_RotateBlock(const FInputActionValue&)
 {
-	if (BuildTool) BuildTool->RotateBlock(1);
+	if (BuildTool) BuildTool->CycleOrientation(1);
 }
 
 void APlayerSurvivalCharacter::Input_ConfirmPlace(const FInputActionValue&)
 {
+	if (PilotedConstruct) return;
 	if (BuildTool) BuildTool->TryConfirmPlacement();
 }
 
 void APlayerSurvivalCharacter::Input_CancelPlace(const FInputActionValue&)
 {
-	if (BuildTool) BuildTool->SetBuildModeEnabled(false);
+	if (BuildTool)
+	{
+		BuildTool->SetBuildModeEnabled(false);
+		BuildTool->SetWeldActive(false);
+		BuildTool->SetDeconstructActive(false);
+	}
 	ToolMode = EPlayerToolMode::Mining;
 }
 
@@ -193,7 +319,15 @@ void APlayerSurvivalCharacter::Input_ToggleTool(const FInputActionValue&)
 
 void APlayerSurvivalCharacter::Input_EnterExitCockpit(const FInputActionValue&)
 {
-	RequestEnterExitCockpit();
+	if (PilotedConstruct)
+	{
+		Server_ExitPilot();
+	}
+	else if (Interactor)
+	{
+		// Interacting with a cockpit seats the pawn (IInteractable pipeline).
+		Interactor->TryInteract();
+	}
 }
 
 void APlayerSurvivalCharacter::CycleToolMode()
@@ -202,21 +336,88 @@ void APlayerSurvivalCharacter::CycleToolMode()
 	{
 	case EPlayerToolMode::None:   ToolMode = EPlayerToolMode::Mining; break;
 	case EPlayerToolMode::Mining: ToolMode = EPlayerToolMode::Build;  break;
-	case EPlayerToolMode::Build:  ToolMode = EPlayerToolMode::Repair; break;
-	case EPlayerToolMode::Repair: ToolMode = EPlayerToolMode::Mining; break;
+	case EPlayerToolMode::Build:  ToolMode = EPlayerToolMode::Weld;   break;
+	case EPlayerToolMode::Weld:   ToolMode = EPlayerToolMode::Mining; break;
 	}
-	if (BuildTool) BuildTool->SetBuildModeEnabled(ToolMode == EPlayerToolMode::Build);
-	if (MiningTool) MiningTool->SetActive(false);
+	if (BuildTool)
+	{
+		BuildTool->SetBuildModeEnabled(ToolMode == EPlayerToolMode::Build);
+		BuildTool->SetWeldActive(false);
+		BuildTool->SetDeconstructActive(false);
+	}
+	if (MiningTool) MiningTool->SetMiningActive(false);
 }
 
-void APlayerSurvivalCharacter::SetSelectedBuildBlock(UBlockDefinitionDataAsset* Block)
+void APlayerSurvivalCharacter::SetSelectedPiece(UPieceDefinitionDataAsset* Piece)
 {
-	if (BuildTool) BuildTool->SetSelectedBlock(Block);
+	if (BuildTool) BuildTool->SetSelectedPiece(Piece);
 }
 
-float APlayerSurvivalCharacter::ApplyExoneerDamage_Implementation(float Amount, EExoneerDamageType Type, AActor* Instigator)
+void APlayerSurvivalCharacter::SetSelectedVehicleBlock(UVehicleBlockDefinitionDataAsset* Block)
 {
-	return HealthC ? HealthC->ApplyDamage(Amount, Type, Instigator) : 0.f;
+	if (BuildTool) BuildTool->SetSelectedVehicleBlock(Block);
+}
+
+// ---------------------------------------------------------------------------
+// Piloting
+// ---------------------------------------------------------------------------
+
+void APlayerSurvivalCharacter::SetPilotedConstruct(AVehicleConstruct* Construct)
+{
+	if (!HasAuthority())
+	{
+		UE_LOG(LogExoneer, Warning, TEXT("SetPilotedConstruct is server-only."));
+		return;
+	}
+	PilotedConstruct = Construct;
+
+	// Reset the local intent so a listen host does not carry stale input
+	// across seatings; remote clients reset when their next send fires.
+	PendingPilotMove = FVector::ZeroVector;
+	PendingPilotRotate = FVector::ZeroVector;
+	PilotSendAccumulator = 0.f;
+}
+
+bool APlayerSurvivalCharacter::Server_SendPilotInput_Validate(AVehicleConstruct* Construct, FVector Move, FVector Rotate)
+{
+	// Never gate on pilot state here: unreliable input packets race every
+	// cockpit exit (client keeps streaming for >= 1 RTT after the server
+	// unseated it), and a _Validate failure DISCONNECTS the client. The
+	// implementation already drops input that no longer matches the seat.
+	// Reject only what an honest client can never send: non-finite vectors.
+	return !Move.ContainsNaN() && !Rotate.ContainsNaN();
+}
+
+void APlayerSurvivalCharacter::Server_SendPilotInput_Implementation(AVehicleConstruct* Construct, FVector Move, FVector Rotate)
+{
+	if (IsValid(Construct) && PilotedConstruct == Construct)
+	{
+		// Sanitize per axis: intents are throttles in -1..1, not directions.
+		Construct->SetPilotInput(Move.BoundToCube(1.f), Rotate.BoundToCube(1.f));
+	}
+}
+
+bool APlayerSurvivalCharacter::Server_ExitPilot_Validate()
+{
+	// State can race with a server-side exit; never kick the client for it.
+	return true;
+}
+
+void APlayerSurvivalCharacter::Server_ExitPilot_Implementation()
+{
+	if (PilotedConstruct)
+	{
+		IPilotable::Execute_ExitPilot(PilotedConstruct, this);
+	}
+}
+
+// ---------------------------------------------------------------------------
+// IDamageable
+// ---------------------------------------------------------------------------
+
+float APlayerSurvivalCharacter::ApplyExoneerDamage_Implementation(float Amount, EExoneerDamageType Type, AActor* DamageInstigator)
+{
+	return HealthC ? HealthC->ApplyDamage(Amount, Type, DamageInstigator) : 0.f;
 }
 
 float APlayerSurvivalCharacter::GetCurrentHealth_Implementation() const

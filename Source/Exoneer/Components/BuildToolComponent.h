@@ -3,35 +3,40 @@
 
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
+#include "Engine/NetSerialization.h"
+#include "ExoneerTypes.h"
 #include "BuildToolComponent.generated.h"
 
-class UBlockDefinitionDataAsset;
-class ABuildableBlock;
-class ABlockGridActor;
+class UPieceDefinitionDataAsset;
+class UVehicleBlockDefinitionDataAsset;
+class ABasePiece;
+class ABaseStructure;
+class AVehicleConstruct;
 class UStaticMeshComponent;
 class UMaterialInterface;
+class UPrimaryDataAsset;
 
 UENUM(BlueprintType)
-enum class EBuildPlacementError : uint8
+enum class EBuildToolMode : uint8
 {
 	None,
-	Overlap,
-	NoSupport,
-	OutOfRange,
-	InvalidGrid,
-	MissingComponents,
-	Unknown
+	BasePlacement,     // Socket-snapped architectural pieces
+	VehiclePlacement   // Grid-snapped vehicle blocks
 };
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnBuildPreviewChanged, bool, bValid, EBuildPlacementError, Error);
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnSelectedBlockChanged, UBlockDefinitionDataAsset*, NewBlock);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnSelectedBuildableChanged, UPrimaryDataAsset*, NewSelection);
 
 /**
- * Player-facing build placement system. Shows a ghost preview that snaps to
- * a grid, supports rotation, and commits a placement via TryConfirmPlacement.
+ * Player build/weld tool.
  *
- * The actual ABuildableBlock is spawned by the target ABlockGridActor (the
- * world's base grid or a vehicle grid).
+ * Placement is ghost-first: confirming spawns a GHOST (free), which is then
+ * finished by welding (hold primary action in Weld tool mode) that consumes
+ * materials from the player inventory. Secondary action deconstructs/refunds.
+ *
+ * The ghost PREVIEW is purely client-side; every commit goes through a Server
+ * RPC on this (connection-owned) component and is fully revalidated by
+ * ABaseStructure / AVehicleConstruct on the server.
  */
 UCLASS(ClassGroup = (Exoneer), meta = (BlueprintSpawnableComponent))
 class EXONEER_API UBuildToolComponent : public UActorComponent
@@ -41,39 +46,116 @@ class EXONEER_API UBuildToolComponent : public UActorComponent
 public:
 	UBuildToolComponent();
 
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Build") float PlacementRange = 600.f;
+	// --- Tunables ---
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Build") float PlacementRange = 800.f;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Build") float TerrainSlopeLimitDeg = 25.f;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weld") float WeldPointsPerSec = 10.f;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weld") float SuitPowerPerWeldPoint = 0.1f;
+
+	/** Weld aim sweep radius (cm); generous because blocks can be 25 cm. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weld") float WeldAimRadius = 14.f;
+
+	/** Health restored per weld point when welding an already-Complete, damaged target. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weld") float RepairHealthPerWeldPoint = 5.f;
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Build") TSoftObjectPtr<UMaterialInterface> ValidPreviewMaterial;
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Build") TSoftObjectPtr<UMaterialInterface> InvalidPreviewMaterial;
 
+	// --- Events (HUD) ---
 	UPROPERTY(BlueprintAssignable) FOnBuildPreviewChanged OnBuildPreviewChanged;
-	UPROPERTY(BlueprintAssignable) FOnSelectedBlockChanged OnSelectedBlockChanged;
+	UPROPERTY(BlueprintAssignable) FOnSelectedBuildableChanged OnSelectedBuildableChanged;
 
+	// --- Mode & selection ---
 	UFUNCTION(BlueprintCallable, Category = "Build") void SetBuildModeEnabled(bool bEnabled);
-	UFUNCTION(BlueprintPure, Category = "Build") bool IsBuildModeEnabled() const { return bBuildMode; }
+	UFUNCTION(BlueprintPure, Category = "Build") bool IsBuildModeEnabled() const { return Mode != EBuildToolMode::None; }
+	UFUNCTION(BlueprintPure, Category = "Build") EBuildToolMode GetMode() const { return Mode; }
 
-	UFUNCTION(BlueprintCallable, Category = "Build") void SetSelectedBlock(UBlockDefinitionDataAsset* Block);
-	UFUNCTION(BlueprintPure, Category = "Build") UBlockDefinitionDataAsset* GetSelectedBlock() const { return SelectedBlock; }
+	UFUNCTION(BlueprintCallable, Category = "Build") void SetSelectedPiece(UPieceDefinitionDataAsset* Piece);
+	UFUNCTION(BlueprintCallable, Category = "Build") void SetSelectedVehicleBlock(UVehicleBlockDefinitionDataAsset* Block);
+	UFUNCTION(BlueprintPure, Category = "Build") UPrimaryDataAsset* GetSelected() const;
+	UFUNCTION(BlueprintPure, Category = "Build") EBuildPlacementError GetLastPreviewError() const { return LastError; }
 
-	UFUNCTION(BlueprintCallable, Category = "Build") void RotateBlock(int32 Steps = 1);
+	// --- Last weld feedback, for the visor HUD (written by Client_WeldFeedback). ---
+	/** 0 progressed, 1 no suit power, 2 missing materials, 3 complete, 4 no target, 255 none. */
+	UPROPERTY(BlueprintReadOnly, Category = "Weld") uint8 LastWeldResult = 255;
+	UPROPERTY(BlueprintReadOnly, Category = "Weld") float LastWeldProgress01 = 0.f;
+	UPROPERTY(BlueprintReadOnly, Category = "Weld") float LastWeldFeedbackSeconds = -1000.f;
 
+	/** R key: cycle vehicle block orientation / base piece socket alternative. */
+	UFUNCTION(BlueprintCallable, Category = "Build") void CycleOrientation(int32 Steps = 1);
+
+	// --- Actions (client entry points) ---
 	UFUNCTION(BlueprintCallable, Category = "Build") bool TryConfirmPlacement();
-	UFUNCTION(BlueprintCallable, Category = "Build") bool TryRemoveTargetedBlock();
-	UFUNCTION(BlueprintCallable, Category = "Build") bool TryRepairTargetedBlock(float Amount);
+
+	/** Hold-to-weld / hold-to-deconstruct; driven by primary/secondary action. */
+	UFUNCTION(BlueprintCallable, Category = "Weld") void SetWeldActive(bool bActive);
+	UFUNCTION(BlueprintCallable, Category = "Weld") void SetDeconstructActive(bool bActive);
 
 	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* TickFn) override;
 
 protected:
-	UPROPERTY(VisibleInstanceOnly) bool bBuildMode = false;
-	UPROPERTY(VisibleInstanceOnly) UBlockDefinitionDataAsset* SelectedBlock = nullptr;
-	UPROPERTY() UStaticMeshComponent* PreviewMesh = nullptr;
-	UPROPERTY() ABlockGridActor* TargetGrid = nullptr;
-	UPROPERTY() FIntVector PreviewCell = FIntVector::ZeroValue;
-	UPROPERTY() int32 RotationStep = 0;  // 0..3 around Z
+	UPROPERTY(VisibleInstanceOnly, Category = "Build") EBuildToolMode Mode = EBuildToolMode::None;
+	UPROPERTY() TObjectPtr<UPieceDefinitionDataAsset> SelectedPiece;
+	UPROPERTY() TObjectPtr<UVehicleBlockDefinitionDataAsset> SelectedBlock;
+	UPROPERTY() TObjectPtr<UStaticMeshComponent> PreviewMesh;
 
+	// Current client-side preview candidate.
+	UPROPERTY() TObjectPtr<ABasePiece> CandidateParent;
+	FName CandidateSocket;
+	FTransform CandidateGroundTransform;
+	bool bCandidateGrounded = false;
+	UPROPERTY() TObjectPtr<AVehicleConstruct> CandidateConstruct;
+	FIntVector CandidateCell = FIntVector::ZeroValue;
+	uint8 Orientation = 0;
+
+	bool bWeldActive = false;
+	bool bDeconstructActive = false;
 	bool bLastPreviewValid = false;
 	EBuildPlacementError LastError = EBuildPlacementError::None;
+	float WeldRpcAccumulator = 0.f;
 
+	// --- Client preview internals ---
 	void EnsurePreviewMesh();
 	void UpdatePreview();
-	bool ResolveTarget(FIntVector& OutCell, ABlockGridActor*& OutGrid, EBuildPlacementError& OutError);
+	void UpdateBasePreview(const FHitResult& Hit);
+	void UpdateVehiclePreview(const FHitResult& Hit);
+	void SetPreviewState(bool bValid, EBuildPlacementError Error, const FTransform& Where);
+	void ClearPreview();
+	bool AimTrace(FHitResult& OutHit) const;
+
+	/** Forgiving weld aim: a sphere sweep, since blocks can be only 25 cm. */
+	bool WeldAimSweep(FHitResult& OutHit) const;
+
+	void TickWeldBeam(float DeltaTime);
+
+	// --- Commit RPCs (validated server-side; see ABaseStructure/AVehicleConstruct) ---
+	UFUNCTION(Server, Reliable, WithValidation)
+	void Server_PlaceBasePiece(UPieceDefinitionDataAsset* Def, ABasePiece* Parent, FName Socket);
+
+	UFUNCTION(Server, Reliable, WithValidation)
+	void Server_PlaceGroundedPiece(UPieceDefinitionDataAsset* Def, FTransform Transform);
+
+	UFUNCTION(Server, Reliable, WithValidation)
+	void Server_PlaceVehicleBlock(AVehicleConstruct* Construct, UVehicleBlockDefinitionDataAsset* Def, FIntVector Origin, uint8 InOrientation);
+
+	UFUNCTION(Server, Reliable, WithValidation)
+	void Server_FoundVehicleConstruct(UVehicleBlockDefinitionDataAsset* Def, FTransform Transform, uint8 InOrientation);
+
+	/** Tells the initiating client why the server refused a placement (HUD feedback). */
+	UFUNCTION(Client, Reliable)
+	void Client_PlacementRejected(EBuildPlacementError Error);
+
+	/** Weld tick result for on-screen feedback: 0 progressed, 1 no suit power, 2 missing materials, 3 already complete. */
+	UFUNCTION(Client, Unreliable)
+	void Client_WeldFeedback(uint8 Result, float Progress01);
+
+	UFUNCTION(Server, Reliable, WithValidation)
+	void Server_Weld(AActor* Target, FVector_NetQuantize WorldPoint, float WeldPoints);
+
+	UFUNCTION(Server, Reliable, WithValidation)
+	void Server_Deconstruct(AActor* Target, FVector_NetQuantize WorldPoint, float WreckPoints);
+
+	/** SERVER helpers shared by the RPC implementations. */
+	bool ServerValidateReach(const FVector& Point) const;
+	bool ServerValidateGrounded(const FTransform& Transform) const;
+	class UInventoryComponent* GetOwnerInventory() const;
 };

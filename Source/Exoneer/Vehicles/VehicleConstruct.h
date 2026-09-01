@@ -1,0 +1,259 @@
+// Copyright Exoneer contributors.
+#pragma once
+
+#include "CoreMinimal.h"
+#include "GameFramework/Actor.h"
+#include "Net/Serialization/FastArraySerializer.h"
+#include "Interfaces/Interactable.h"
+#include "Interfaces/Constructible.h"
+#include "Interfaces/Pilotable.h"
+#include "Interfaces/Damageable.h"
+#include "ExoneerTypes.h"
+#include "VehicleConstruct.generated.h"
+
+class UVehicleBlockDefinitionDataAsset;
+class UVehicleModule;
+class UStaticMesh;
+class UStaticMeshComponent;
+class UInstancedStaticMeshComponent;
+class UBoxComponent;
+class AVehicleConstruct;
+
+/**
+ * One placed vehicle block on the construct's 25 cm grid. Replicates through
+ * the fast array; clients rebuild collision boxes and mesh instances from
+ * these records.
+ */
+USTRUCT(BlueprintType)
+struct FVehicleBlockRecord : public FFastArraySerializerItem
+{
+	GENERATED_BODY()
+
+	/** Stable per-construct id; never reused. */
+	UPROPERTY(BlueprintReadOnly, Category = "Vehicle")
+	int32 BlockInstanceId = INDEX_NONE;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Vehicle")
+	TObjectPtr<UVehicleBlockDefinitionDataAsset> Def = nullptr;
+
+	/** Min-corner cell of the rotated AABB. */
+	UPROPERTY(BlueprintReadOnly, Category = "Vehicle")
+	FIntVector Origin = FIntVector::ZeroValue;
+
+	/** 0..23, see ExoneerVehicleOrientation. */
+	UPROPERTY(BlueprintReadOnly, Category = "Vehicle")
+	uint8 Orientation = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Vehicle")
+	int32 StageIndex = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Vehicle")
+	float StageProgress01 = 0.f;
+
+	/** Ghost until any progress, Complete when the last stage finishes. */
+	UPROPERTY(BlueprintReadOnly, Category = "Vehicle")
+	EConstructionPhase Phase = EConstructionPhase::Ghost;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Vehicle")
+	float Health = 1.f;
+
+	/** Module scratch replicated for VFX: thruster throttle, battery charge 0..1. */
+	UPROPERTY(BlueprintReadOnly, Category = "Vehicle")
+	float StateScalar = 0.f;
+
+	/**
+	 * SERVER-ONLY. Set when deconstruction starts on a Complete block so the
+	 * 50% refund penalty holds for the whole reversal; cleared if the block
+	 * is welded back to Complete.
+	 */
+	UPROPERTY(NotReplicated)
+	uint8 bDeconstructPenalty = 0;
+
+	void PreReplicatedRemove(const struct FVehicleBlockList& InArray);
+	void PostReplicatedAdd(const struct FVehicleBlockList& InArray);
+	void PostReplicatedChange(const struct FVehicleBlockList& InArray);
+};
+
+USTRUCT()
+struct FVehicleBlockList : public FFastArraySerializer
+{
+	GENERATED_BODY()
+
+	UPROPERTY()
+	TArray<FVehicleBlockRecord> Blocks;
+
+	UPROPERTY(NotReplicated)
+	TObjectPtr<AVehicleConstruct> OwnerConstruct = nullptr;
+
+	bool NetDeltaSerialize(FNetDeltaSerializeInfo& DeltaParms)
+	{
+		return FFastArraySerializer::FastArrayDeltaSerialize<FVehicleBlockRecord, FVehicleBlockList>(Blocks, DeltaParms, *this);
+	}
+};
+
+template<>
+struct TStructOpsTypeTraits<FVehicleBlockList> : public TStructOpsTypeTraitsBase2<FVehicleBlockList>
+{
+	enum { WithNetDeltaSerializer = true };
+};
+
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnVehicleBlocksChanged);
+
+/**
+ * A vehicle: one server-simulated rigid body plus a unified 25 cm block grid.
+ *
+ * Physics: the invisible root simulates on the server; every block contributes
+ * a welded UBoxComponent with SetMassOverrideInKg(block mass), so total mass,
+ * center of mass, and inertia emerge from the layout. Clients do not simulate;
+ * they receive replicated movement and rebuild visuals (per-mesh instanced
+ * components) and query-only collision from the replicated block records.
+ *
+ * Power: a simplified ledger over module blocks each server tick produces
+ * PowerSupplyFraction, which scales thrust (SE-style brownouts).
+ *
+ * Piloting: the pilot's CHARACTER stays possessed and forwards its move/look
+ * input to the construct through its own Server RPC; the construct routes it
+ * to thrust/torque. IPilotable::EnterPilot seats a pawn at a cockpit block.
+ *
+ * Removing blocks runs split detection: disconnected islands become new
+ * constructs (or drop as scrap when trivially small).
+ */
+UCLASS(BlueprintType, Blueprintable)
+class EXONEER_API AVehicleConstruct : public AActor, public IInteractable, public IConstructible, public IPilotable, public IDamageable
+{
+	GENERATED_BODY()
+
+public:
+	AVehicleConstruct();
+
+	static constexpr float CellSize = 25.f;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Vehicle")
+	TObjectPtr<UStaticMeshComponent> PhysicsRoot;
+
+	// --- Tunables ---
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Vehicle") float RotationTorquePerKg = 800.f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Vehicle") int32 ScrapInsteadOfSplitMaxBlocks = 1;
+
+	// --- Replicated state ---
+	UPROPERTY(Replicated, VisibleAnywhere, BlueprintReadOnly, Category = "Vehicle")
+	float PowerSupplyFraction = 1.f;
+
+	UPROPERTY(ReplicatedUsing = OnRep_Pilot, VisibleAnywhere, BlueprintReadOnly, Category = "Vehicle")
+	TObjectPtr<APawn> PilotPawn;
+
+	UPROPERTY(Replicated, VisibleAnywhere, BlueprintReadOnly, Category = "Vehicle")
+	int32 ActiveCockpitId = INDEX_NONE;
+
+	UPROPERTY(BlueprintAssignable) FOnVehicleBlocksChanged OnBlocksChanged;
+
+	// --- SERVER grid API (called from build tool RPCs and modules) ---
+
+	UFUNCTION(BlueprintCallable, Category = "Vehicle")
+	bool CanPlaceBlock(UVehicleBlockDefinitionDataAsset* Def, FIntVector Origin, uint8 Orientation, EBuildPlacementError& OutError) const;
+
+	/** Spawn a GHOST block record. Returns its BlockInstanceId or INDEX_NONE. */
+	UFUNCTION(BlueprintCallable, Category = "Vehicle")
+	int32 PlaceBlockGhost(UVehicleBlockDefinitionDataAsset* Def, FIntVector Origin, uint8 Orientation);
+
+	UFUNCTION(BlueprintCallable, Category = "Vehicle")
+	bool RemoveBlock(int32 BlockInstanceId);
+
+	UFUNCTION(BlueprintCallable, Category = "Vehicle")
+	float ApplyDamageToBlockAt(const FVector& WorldPoint, float Amount, EExoneerDamageType Type, AActor* DamageInstigator);
+
+	/** SERVER. Restore up to Amount health on the block at WorldPoint (weld-to-repair). Returns health restored. */
+	UFUNCTION(BlueprintCallable, Category = "Vehicle")
+	float RepairBlockAt(const FVector& WorldPoint, float Amount);
+
+	/** SERVER. Found a brand-new construct with its first ghost block (at the grid origin, with the given orientation). */
+	static AVehicleConstruct* FoundConstruct(UWorld* World, UVehicleBlockDefinitionDataAsset* Def, const FTransform& Transform, EBuildPlacementError& OutError, uint8 Orientation = 0);
+
+	// --- Queries (server + client) ---
+	UFUNCTION(BlueprintPure, Category = "Vehicle") int32 GetBlockCount() const { return BlockList.Blocks.Num(); }
+	UFUNCTION(BlueprintPure, Category = "Vehicle") const TArray<FVehicleBlockRecord>& GetBlocks() const { return BlockList.Blocks; }
+	const FVehicleBlockRecord* FindRecord(int32 BlockInstanceId) const;
+	int32 FindBlockAtCell(const FIntVector& Cell) const;
+	int32 FindBlockAtWorldPoint(const FVector& WorldPoint) const;
+
+	UFUNCTION(BlueprintPure, Category = "Vehicle")
+	FIntVector WorldToCell(const FVector& WorldLocation) const;
+
+	UFUNCTION(BlueprintPure, Category = "Vehicle")
+	FVector CellToWorld(const FIntVector& Cell) const;
+
+	UFUNCTION(BlueprintPure, Category = "Vehicle")
+	FTransform GetBlockWorldTransform(const FVehicleBlockRecord& Record) const;
+
+	/** Sun fraction pull-through for solar modules (0 when no env manager). */
+	float GetSunFraction() const;
+
+	/** SERVER. Pilot input intents, forwarded by the pilot's character RPC. */
+	void SetPilotInput(const FVector& MoveInput, const FVector& RotateInput);
+
+	/**
+	 * SERVER. Overwrite one record's construction/health fields (save-load
+	 * path) and mark it dirty. OrientationOverride >= 0 also restores the
+	 * orientation (used for the founding block). Returns false if the id is
+	 * unknown.
+	 */
+	bool RestoreBlockRecord(int32 BlockInstanceId, EConstructionPhase InPhase, int32 InStageIndex, float InStageProgress01, float InHealth, float InStateScalar, int32 OrientationOverride = -1);
+
+	// IPilotable
+	virtual bool EnterPilot_Implementation(APawn* Pilot, int32 StationId) override;
+	virtual void ExitPilot_Implementation(APawn* Pilot) override;
+	virtual void ApplyPilotInput_Implementation(const FVector& MoveInput, const FVector& RotateInput) override;
+
+	// IInteractable (interact = enter/exit nearest cockpit)
+	virtual bool OnInteract_Implementation(AActor* Interactor) override;
+	virtual FText GetInteractionPrompt_Implementation() const override;
+	virtual FGameplayTagContainer GetInteractionTags_Implementation() const override;
+
+	// IConstructible (per-block, addressed by WorldPoint)
+	virtual EConstructionPhase GetConstructionPhaseAt_Implementation(const FVector& WorldPoint) const override;
+	virtual float GetConstructionProgressAt_Implementation(const FVector& WorldPoint) const override;
+	virtual float InvestConstruction_Implementation(AActor* Builder, UInventoryComponent* SourceInventory, const FVector& WorldPoint, float WeldPoints) override;
+	virtual float DeconstructAt_Implementation(AActor* Builder, UInventoryComponent* RefundInventory, const FVector& WorldPoint, float WreckPoints) override;
+
+	// IDamageable (routes to the hit block)
+	virtual float ApplyExoneerDamage_Implementation(float Amount, EExoneerDamageType Type, AActor* Instigator) override;
+
+	virtual void Tick(float DeltaSeconds) override;
+	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
+
+	/** Rebuild boxes/instances/cell map from records. Client fast array hook. */
+	void MarkVisualsDirty() { bVisualsDirty = true; }
+
+protected:
+	virtual void BeginPlay() override;
+
+	UPROPERTY(Replicated)
+	FVehicleBlockList BlockList;
+
+	/** SERVER. Live modules by BlockInstanceId (Complete functional blocks only). */
+	UPROPERTY()
+	TMap<int32, TObjectPtr<UVehicleModule>> Modules;
+
+	/** Rebuilt from records on both sides. */
+	TMap<FIntVector, int32> CellToBlock;
+	UPROPERTY() TMap<int32, TObjectPtr<UBoxComponent>> BlockBodies;
+	UPROPERTY() TMap<TObjectPtr<UStaticMesh>, TObjectPtr<UInstancedStaticMeshComponent>> VisualLayers;
+
+	int32 NextBlockInstanceId = 0;
+	bool bVisualsDirty = false;
+
+	FVector PendingMove = FVector::ZeroVector;
+	FVector PendingRotate = FVector::ZeroVector;
+
+	UFUNCTION() void OnRep_Pilot();
+
+	// --- Internals ---
+	void RebuildDerivedState();          // cell map + bodies + visuals + mass
+	void ServerTickPowerLedger(float DeltaSeconds);
+	void ServerTickModules(float DeltaSeconds);
+	void ServerRouteThrust(float DeltaSeconds);
+	void SyncModulesToRecords();         // create/destroy modules on phase changes
+	void RunSplitDetection();            // after any removal
+	FVehicleBlockRecord* FindMutableRecord(int32 BlockInstanceId);
+	void MarkRecordDirty(FVehicleBlockRecord& Record);
+};

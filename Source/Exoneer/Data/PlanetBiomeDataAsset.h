@@ -59,6 +59,10 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Biome")
 	float StormProbabilityPerHour = 0.05f;
 
+	/** Structure damage per second from a full-intensity storm, before piece StormResistance. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Biome", meta = (ClampMin = "0"))
+	float StormDamagePerSecond = 2.f;
+
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Biome")
 	float RadiationLevel = 0.f;             // 0..1
 

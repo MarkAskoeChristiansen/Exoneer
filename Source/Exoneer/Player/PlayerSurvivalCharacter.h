@@ -5,10 +5,12 @@
 #include "GameFramework/Character.h"
 #include "Interfaces/Damageable.h"
 #include "Interfaces/InventoryOwner.h"
+#include "ExoneerTypes.h"
 #include "PlayerSurvivalCharacter.generated.h"
 
 class UCameraComponent;
 class USpringArmComponent;
+class UPrimaryDataAsset;
 class UInputAction;
 class UInputMappingContext;
 class UInventoryComponent;
@@ -17,7 +19,9 @@ class UHealthComponent;
 class UInteractionComponent;
 class UMiningToolComponent;
 class UBuildToolComponent;
-class UBlockDefinitionDataAsset;
+class UPieceDefinitionDataAsset;
+class UVehicleBlockDefinitionDataAsset;
+class AVehicleConstruct;
 
 UENUM(BlueprintType)
 enum class EPlayerToolMode : uint8
@@ -25,7 +29,7 @@ enum class EPlayerToolMode : uint8
 	None,
 	Mining,
 	Build,
-	Repair
+	Weld
 };
 
 /**
@@ -40,6 +44,12 @@ enum class EPlayerToolMode : uint8
  *  - BuildToolComponent
  *
  * Enhanced Input is read from the bound IMC on possession.
+ *
+ * Piloting: the server seats this pawn on an AVehicleConstruct via
+ * SetPilotedConstruct (called from the construct's EnterPilot/ExitPilot).
+ * While seated, move/look input is suppressed locally and forwarded to the
+ * construct through Server_SendPilotInput at ~PilotInputSendHz, because the
+ * construct itself is not connection-owned and cannot receive client RPCs.
  */
 UCLASS(BlueprintType, Blueprintable)
 class EXONEER_API APlayerSurvivalCharacter : public ACharacter, public IDamageable, public IInventoryOwner
@@ -81,14 +91,38 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Movement") float SprintSpeed = 800.f;
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Movement") float JumpHeight = 460.f;
 
+	/** How often accumulated pilot input is sent to the server while seated. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Piloting") float PilotInputSendHz = 20.f;
+
 	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category = "Tool") EPlayerToolMode ToolMode = EPlayerToolMode::Mining;
+
+	/** Construct this pawn currently pilots; set by the SERVER via SetPilotedConstruct. */
+	UPROPERTY(Replicated, VisibleInstanceOnly, BlueprintReadOnly, Category = "Piloting")
+	TObjectPtr<AVehicleConstruct> PilotedConstruct;
+
+	/** SERVER. Called by AVehicleConstruct when this pawn is seated/released. */
+	void SetPilotedConstruct(AVehicleConstruct* Construct);
+
+	UFUNCTION(BlueprintPure, Category = "Piloting") bool IsPiloting() const { return PilotedConstruct != nullptr; }
+
+	UFUNCTION(BlueprintPure, Category = "Debug") int32 GetQuickBarIndex() const { return QuickBarIndex; }
 
 	// --- BP-callable helpers ---
 	UFUNCTION(BlueprintCallable) void CycleToolMode();
-	UFUNCTION(BlueprintCallable) void SetSelectedBuildBlock(UBlockDefinitionDataAsset* Block);
+	UFUNCTION(BlueprintCallable) void SetSelectedPiece(UPieceDefinitionDataAsset* Piece);
+	UFUNCTION(BlueprintCallable) void SetSelectedVehicleBlock(UVehicleBlockDefinitionDataAsset* Block);
 	UFUNCTION(BlueprintImplementableEvent) void RequestOpenInventoryUI();
 	UFUNCTION(BlueprintImplementableEvent) void RequestOpenBuildMenuUI();
-	UFUNCTION(BlueprintImplementableEvent) void RequestEnterExitCockpit();
+
+	// --- Prototype debug affordances (until the diegetic UI stack exists) ---
+
+	/** Buildables the build-menu key cycles through (pieces or vehicle blocks). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debug")
+	TArray<TObjectPtr<UPrimaryDataAsset>> QuickBar;
+
+	/** Granted once on the server at spawn so the build loop can bootstrap. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debug")
+	TArray<FInventoryEntry> StarterItems;
 
 	// IDamageable
 	virtual float ApplyExoneerDamage_Implementation(float Amount, EExoneerDamageType Type, AActor* Instigator) override;
@@ -99,7 +133,9 @@ public:
 	virtual UInventoryComponent* GetInventory_Implementation() const override { return Inventory; }
 
 	virtual void BeginPlay() override;
+	virtual void Tick(float DeltaSeconds) override;
 	virtual void SetupPlayerInputComponent(UInputComponent* PlayerInputComponent) override;
+	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 
 protected:
 	// Input handlers.
@@ -113,6 +149,7 @@ protected:
 	void Input_PrimaryStart(const struct FInputActionValue& Value);
 	void Input_PrimaryStop(const struct FInputActionValue& Value);
 	void Input_SecondaryStart(const struct FInputActionValue& Value);
+	void Input_SecondaryStop(const struct FInputActionValue& Value);
 	void Input_OpenInventory(const struct FInputActionValue& Value);
 	void Input_OpenBuildMenu(const struct FInputActionValue& Value);
 	void Input_RotateBlock(const struct FInputActionValue& Value);
@@ -120,4 +157,22 @@ protected:
 	void Input_CancelPlace(const struct FInputActionValue& Value);
 	void Input_ToggleTool(const struct FInputActionValue& Value);
 	void Input_EnterExitCockpit(const struct FInputActionValue& Value);
+
+	// --- Piloting (client intent -> server; the construct is not connection-owned) ---
+
+	/** Move/rotate intents, batched to ~PilotInputSendHz in Tick. Unreliable: the next send supersedes a lost one. */
+	UFUNCTION(Server, Unreliable, WithValidation)
+	void Server_SendPilotInput(AVehicleConstruct* Construct, FVector Move, FVector Rotate);
+
+	/** Leave the cockpit. Reliable: a lost exit would strand the pilot. */
+	UFUNCTION(Server, Reliable, WithValidation)
+	void Server_ExitPilot();
+
+	/** Local intent accumulated between the throttled sends. */
+	FVector PendingPilotMove = FVector::ZeroVector;
+	FVector PendingPilotRotate = FVector::ZeroVector;
+	float PilotSendAccumulator = 0.f;
+
+	/** Current QuickBar selection (debug build-menu cycling). */
+	int32 QuickBarIndex = INDEX_NONE;
 };

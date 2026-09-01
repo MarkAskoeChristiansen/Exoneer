@@ -1,16 +1,22 @@
 // Copyright Exoneer contributors.
 #include "Components/PowerNetworkComponent.h"
 #include "Components/PowerComponent.h"
+#include "GameFramework/Actor.h"
+#include "Net/UnrealNetwork.h"
 
 UPowerNetworkComponent::UPowerNetworkComponent()
 {
 	PrimaryComponentTick.bCanEverTick = true;
-	PrimaryComponentTick.TickInterval = 0.2f; // 5 Hz event-style simulation
+	PrimaryComponentTick.TickInterval = 0.2f;   // matches SimInterval default
+	SetIsReplicatedByDefault(true);
 }
 
 void UPowerNetworkComponent::Register(UPowerComponent* Node)
 {
-	if (Node) Nodes.AddUnique(Node);
+	if (Node)
+	{
+		Nodes.AddUnique(Node);
+	}
 }
 
 void UPowerNetworkComponent::Unregister(UPowerComponent* Node)
@@ -22,47 +28,59 @@ void UPowerNetworkComponent::TickComponent(float DeltaTime, ELevelTick TickType,
 {
 	Super::TickComponent(DeltaTime, TickType, TickFn);
 
-	FPowerNetworkSnapshot Snap;
-	float TotalProductionW = 0.f;
-	float TotalDrawW = 0.f;
-	float TotalStored = 0.f;
-	float TotalStorageCap = 0.f;
-
-	// Pass 1: producers (incl. batteries' discharge potential), demand, storage capacity.
-	for (UPowerComponent* N : Nodes)
+	const AActor* Owner = GetOwner();
+	if (!Owner || !Owner->HasAuthority())
 	{
-		if (!N || !N->bEnabled) continue;
-		if (N->NominalOutput > 0.f)
+		// Clients consume the replicated snapshot; no local simulation.
+		SetComponentTickEnabled(false);
+		return;
+	}
+
+	// The tick interval IS the sim batch: DeltaTime carries the accumulated
+	// wall time since the previous sim. Tracks designer edits to SimInterval.
+	PrimaryComponentTick.TickInterval = SimInterval;
+
+	Simulate(DeltaTime);
+}
+
+void UPowerNetworkComponent::Simulate(float DeltaSeconds)
+{
+	const float Dt = FMath::Max(DeltaSeconds, KINDA_SMALL_NUMBER);
+
+	// Drop nodes whose owning piece was destroyed since the last sim.
+	Nodes.RemoveAll([](const TObjectPtr<UPowerComponent>& N) { return N == nullptr; });
+
+	// Pass 1: production, demand, and battery totals over enabled nodes.
+	float Production = 0.f;
+	float Demand = 0.f;
+	float Stored = 0.f;
+	float Storage = 0.f;
+	for (const UPowerComponent* N : Nodes)
+	{
+		if (!N || !N->bEnabled)
 		{
-			TotalProductionW += N->NominalOutput;
+			continue;
 		}
-		if (N->NominalDraw > 0.f)
-		{
-			TotalDrawW += N->NominalDraw;
-		}
+		Production += FMath::Max(0.f, N->NominalOutput);
+		Demand += FMath::Max(0.f, N->NominalDraw);
 		if (N->IsBattery())
 		{
-			TotalStorageCap += N->StorageCapacity;
-			TotalStored += N->StoredEnergy;
+			Stored += N->StoredEnergy;
+			Storage += N->StorageCapacity;
 		}
 	}
 
-	// Compute supply available to consumers this tick.
-	float AvailableW = TotalProductionW;
-	float NeededDeficitW = FMath::Max(0.f, TotalDrawW - AvailableW);
-
-	// Discharge batteries to make up deficit.
+	// Batteries discharge (proportionally to their charge) to cover a deficit.
+	float Available = Production;
+	const float DeficitW = FMath::Max(0.f, Demand - Production);
 	float DischargeW = 0.f;
-	if (NeededDeficitW > 0.f && TotalStored > 0.f)
+	if (DeficitW > 0.f && Stored > 0.f)
 	{
-		const float MaxDischargeJoules = TotalStored;
-		const float NeededJoules = NeededDeficitW * DeltaTime;
-		const float Joules = FMath::Min(MaxDischargeJoules, NeededJoules);
-		DischargeW = Joules / FMath::Max(DeltaTime, KINDA_SMALL_NUMBER);
-		AvailableW += DischargeW;
+		const float Joules = FMath::Min(Stored, DeficitW * Dt);
+		DischargeW = Joules / Dt;
+		Available += DischargeW;
 
-		// Remove energy from batteries proportionally.
-		const float Frac = (TotalStored > 0.f) ? (Joules / TotalStored) : 0.f;
+		const float Frac = Joules / Stored;
 		for (UPowerComponent* N : Nodes)
 		{
 			if (N && N->bEnabled && N->IsBattery())
@@ -72,59 +90,71 @@ void UPowerNetworkComponent::TickComponent(float DeltaTime, ELevelTick TickType,
 		}
 	}
 
-	const float SupplyFraction = (TotalDrawW > 0.f) ? FMath::Clamp(AvailableW / TotalDrawW, 0.f, 1.f) : 1.f;
-
-	// Pass 2: assign supply fraction to each consumer.
-	for (UPowerComponent* N : Nodes)
+	// Surplus production charges batteries, split by remaining headroom.
+	const float SurplusJoules = FMath::Max(0.f, Production - Demand) * Dt;
+	if (SurplusJoules > 0.f)
 	{
-		if (!N) continue;
-		N->SupplyFraction = (N->NominalDraw > 0.f) ? SupplyFraction : 1.f;
-	}
-
-	// Surplus production charges batteries.
-	float SurplusW = FMath::Max(0.f, TotalProductionW - TotalDrawW);
-	if (SurplusW > 0.f)
-	{
-		float SurplusJoules = SurplusW * DeltaTime;
-		// Distribute to batteries that have headroom (equal share).
-		TArray<UPowerComponent*> Batteries;
 		float TotalHeadroom = 0.f;
-		for (UPowerComponent* N : Nodes)
+		for (const UPowerComponent* N : Nodes)
 		{
 			if (N && N->bEnabled && N->IsBattery())
 			{
-				const float Headroom = FMath::Max(0.f, N->StorageCapacity - N->StoredEnergy);
-				if (Headroom > 0.f)
-				{
-					Batteries.Add(N);
-					TotalHeadroom += Headroom;
-				}
+				TotalHeadroom += FMath::Max(0.f, N->StorageCapacity - N->StoredEnergy);
 			}
 		}
 		if (TotalHeadroom > 0.f)
 		{
 			const float ToStore = FMath::Min(SurplusJoules, TotalHeadroom);
-			for (UPowerComponent* N : Batteries)
+			for (UPowerComponent* N : Nodes)
 			{
-				const float Headroom = FMath::Max(0.f, N->StorageCapacity - N->StoredEnergy);
-				const float Share = ToStore * (Headroom / TotalHeadroom);
-				N->StoredEnergy = FMath::Min(N->StorageCapacity, N->StoredEnergy + Share);
+				if (N && N->bEnabled && N->IsBattery())
+				{
+					const float Headroom = FMath::Max(0.f, N->StorageCapacity - N->StoredEnergy);
+					N->StoredEnergy = FMath::Min(N->StorageCapacity, N->StoredEnergy + ToStore * (Headroom / TotalHeadroom));
+				}
 			}
 		}
 	}
 
-	// Recompute snapshot stored.
-	TotalStored = 0.f;
+	// Pass 2: write supply back to nodes. Disabled nodes receive nothing;
+	// enabled zero-draw nodes count as fully supplied.
+	const float Fraction = Demand > 0.f ? FMath::Clamp(Available / Demand, 0.f, 1.f) : 1.f;
+	float StoredAfter = 0.f;
 	for (UPowerComponent* N : Nodes)
 	{
-		if (N && N->IsBattery()) TotalStored += N->StoredEnergy;
+		if (!N)
+		{
+			continue;
+		}
+		if (!N->bEnabled)
+		{
+			N->SupplyFraction = 0.f;
+			continue;
+		}
+		N->SupplyFraction = N->NominalDraw > 0.f ? Fraction : 1.f;
+		if (N->IsBattery())
+		{
+			StoredAfter += N->StoredEnergy;
+		}
 	}
 
-	Snap.TotalProduction = TotalProductionW;
-	Snap.TotalDemand = TotalDrawW;
-	Snap.TotalStored = TotalStored;
-	Snap.TotalStorage = TotalStorageCap;
-	Snap.bOverload = (TotalDrawW > TotalProductionW + (DischargeW * 1.05f));
-	LastSnapshot = Snap;
-	OnPowerNetworkUpdated.Broadcast(Snap);
+	Snapshot.TotalProduction = Production;
+	Snapshot.TotalDemand = Demand;
+	Snapshot.TotalStored = StoredAfter;
+	Snapshot.TotalStorage = Storage;
+	Snapshot.bOverload = Fraction < 1.f - KINDA_SMALL_NUMBER;
+
+	// RepNotify only fires on clients; mirror the broadcast on the server.
+	OnPowerNetworkUpdated.Broadcast(Snapshot);
+}
+
+void UPowerNetworkComponent::OnRep_Snapshot()
+{
+	OnPowerNetworkUpdated.Broadcast(Snapshot);
+}
+
+void UPowerNetworkComponent::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
+{
+	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
+	DOREPLIFETIME(UPowerNetworkComponent, Snapshot);
 }

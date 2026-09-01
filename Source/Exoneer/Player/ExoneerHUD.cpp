@@ -233,6 +233,18 @@ void AExoneerHUD::DrawToolPanel(APlayerSurvivalCharacter* Engineer)
 
 	if (BuildTool)
 	{
+		// Current aim of the selected vehicle block (R cycles a curated list:
+		// six thrust directions for thrusters, four yaws for the rest).
+		if (Engineer->ToolMode == EPlayerToolMode::Build)
+		{
+			const FString AimLabel = BuildTool->GetOrientationLabel();
+			if (!AimLabel.IsEmpty())
+			{
+				DrawText(FString::Printf(TEXT("AIM  %s   [R]"), *AimLabel), VisorGood, X, Y, Font);
+				Y += 15.f;
+			}
+		}
+
 		// Placement validity / server rejection.
 		if (BuildTool->GetMode() != EBuildToolMode::None)
 		{

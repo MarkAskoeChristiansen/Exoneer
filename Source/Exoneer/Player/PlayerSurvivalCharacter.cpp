@@ -47,6 +47,13 @@ APlayerSurvivalCharacter::APlayerSurvivalCharacter()
 		CMC->PushForceFactor = 200000.f;   // kg*cm/s^2 = 2 kN
 		CMC->bPushForceScaledToMass = false;
 		CMC->bScalePushForceToVelocity = true;
+		// No touch IMPULSE at all: the engine default (500k) fires on first
+		// contact scaled by pawn velocity, so jumping onto your own rover's
+		// wheel kicked the whole vehicle. Sustained pushing (above) and the
+		// standing weight transfer below are the physical channels.
+		CMC->InitialPushForceFactor = 0.f;
+		// Standing weight transfer (the suspension dipping under you) rides
+		// the engine's default standing downward force - no override needed.
 	}
 
 	Inventory     = CreateDefaultSubobject<UInventoryComponent>(TEXT("Inventory"));

@@ -119,13 +119,109 @@ UPrimaryDataAsset* UBuildToolComponent::GetSelected() const
 	return SelectedPiece ? static_cast<UPrimaryDataAsset*>(SelectedPiece.Get()) : static_cast<UPrimaryDataAsset*>(SelectedBlock.Get());
 }
 
+namespace
+{
+	struct FCuratedOrientation
+	{
+		uint8 Index = 0;
+		const TCHAR* Label = TEXT("");
+	};
+
+	/** First of the 24 orientations whose rotation maps LocalAxis onto TargetWorld. */
+	uint8 FindOrientationFor(const FVector& LocalAxis, const FVector& TargetWorld)
+	{
+		for (uint8 Candidate = 0; Candidate < ExoneerVehicleOrientation::NumOrientations; ++Candidate)
+		{
+			if (ExoneerVehicleOrientation::GetQuat(Candidate).RotateVector(LocalAxis).Equals(TargetWorld, 0.01f))
+			{
+				return Candidate;
+			}
+		}
+		return 0;
+	}
+
+	/**
+	 * Thrusters push along block local -X: six aim directions, UP first
+	 * (hover thrust is the common case). Cycling 24 raw orientations to aim
+	 * one thruster was the opposite of an interface.
+	 */
+	const TArray<FCuratedOrientation>& GetThrustOrientations()
+	{
+		static const TArray<FCuratedOrientation> Set = []
+		{
+			const FVector ThrustAxis(-1.f, 0.f, 0.f);
+			return TArray<FCuratedOrientation>{
+				{ FindOrientationFor(ThrustAxis, FVector::UpVector), TEXT("THRUST: UP") },
+				{ FindOrientationFor(ThrustAxis, FVector::ForwardVector), TEXT("THRUST: FORWARD") },
+				{ FindOrientationFor(ThrustAxis, FVector::BackwardVector), TEXT("THRUST: BACK") },
+				{ FindOrientationFor(ThrustAxis, FVector::LeftVector), TEXT("THRUST: LEFT") },
+				{ FindOrientationFor(ThrustAxis, FVector::RightVector), TEXT("THRUST: RIGHT") },
+				{ FindOrientationFor(ThrustAxis, FVector::DownVector), TEXT("THRUST: DOWN") },
+			};
+		}();
+		return Set;
+	}
+
+	/** Everything else on the grid only meaningfully yaws (cockpit facing, wheel axle, symmetric boxes). */
+	const TArray<FCuratedOrientation>& GetYawOrientations()
+	{
+		static const TArray<FCuratedOrientation> Set = []
+		{
+			return TArray<FCuratedOrientation>{
+				{ FindOrientationFor(FVector::ForwardVector, FVector::ForwardVector), TEXT("YAW 0") },
+				{ FindOrientationFor(FVector::ForwardVector, FVector::RightVector), TEXT("YAW 90") },
+				{ FindOrientationFor(FVector::ForwardVector, FVector::BackwardVector), TEXT("YAW 180") },
+				{ FindOrientationFor(FVector::ForwardVector, FVector::LeftVector), TEXT("YAW 270") },
+			};
+		}();
+		return Set;
+	}
+
+	const TArray<FCuratedOrientation>& GetOrientationSetFor(const UVehicleBlockDefinitionDataAsset* Block)
+	{
+		return Block && Block->MaxThrust > 0.f ? GetThrustOrientations() : GetYawOrientations();
+	}
+}
+
 void UBuildToolComponent::CycleOrientation(int32 Steps)
 {
-	// Walk through ALL 24 orientations (yaw first, then up-axis via wrap) so
-	// thrusters can point in every direction, not just horizontally. Base mode
-	// reuses the same counter to cycle socket alternatives / ground yaw.
+	// Vehicle blocks cycle a CURATED aim list (6 thrust directions, or 4
+	// yaws) instead of all 24 raw orientations. Base mode keeps the raw
+	// counter: it only feeds socket-alternative / ground-yaw modulos.
+	if (SelectedBlock)
+	{
+		const TArray<FCuratedOrientation>& Set = GetOrientationSetFor(SelectedBlock);
+		int32 Current = Set.IndexOfByPredicate([this](const FCuratedOrientation& Entry)
+		{
+			return Entry.Index == Orientation;
+		});
+		if (Current == INDEX_NONE)
+		{
+			Current = 0;
+		}
+		const int32 Next = ((Current + Steps) % Set.Num() + Set.Num()) % Set.Num();
+		Orientation = Set[Next].Index;
+		return;
+	}
 	const int32 Wrapped = (static_cast<int32>(Orientation) + Steps) % ExoneerVehicleOrientation::NumOrientations;
 	Orientation = static_cast<uint8>(Wrapped < 0 ? Wrapped + ExoneerVehicleOrientation::NumOrientations : Wrapped);
+}
+
+FString UBuildToolComponent::GetOrientationLabel() const
+{
+	if (!SelectedBlock)
+	{
+		return FString();
+	}
+	const TArray<FCuratedOrientation>& Set = GetOrientationSetFor(SelectedBlock);
+	for (const FCuratedOrientation& Entry : Set)
+	{
+		if (Entry.Index == Orientation)
+		{
+			return Entry.Label;
+		}
+	}
+	return FString::Printf(TEXT("ORIENT %d"), Orientation);
 }
 
 // --- Tick ---

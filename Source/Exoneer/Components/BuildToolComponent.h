@@ -83,6 +83,9 @@ public:
 	/** R key: cycle vehicle block orientation / base piece socket alternative. */
 	UFUNCTION(BlueprintCallable, Category = "Build") void CycleOrientation(int32 Steps = 1);
 
+	/** Human label for the current aim of the selected vehicle block ("THRUST: UP", "YAW 90"); empty when not applicable. */
+	UFUNCTION(BlueprintPure, Category = "Build") FString GetOrientationLabel() const;
+
 	// --- Actions (client entry points) ---
 	UFUNCTION(BlueprintCallable, Category = "Build") bool TryConfirmPlacement();
 

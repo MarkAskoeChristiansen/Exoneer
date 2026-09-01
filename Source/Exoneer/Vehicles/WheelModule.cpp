@@ -8,6 +8,7 @@
 #include "World/PlanetEnvironmentManager.h"
 #include "Components/StaticMeshComponent.h"
 #include "Engine/World.h"
+#include "GameFramework/Pawn.h"
 #include "PhysicalMaterials/PhysicalMaterial.h"
 
 void UWheelModule::Initialize(AVehicleConstruct* InConstruct, int32 InBlockInstanceId)
@@ -118,8 +119,16 @@ void UWheelModule::TickModule(float DeltaSeconds)
 	FCollisionQueryParams Params(SCENE_QUERY_STAT(ExoneerWheelProbe), /*bTraceComplex*/ false, Owner);
 	Params.bReturnPhysicalMaterial = true;
 	FHitResult Hit;
-	const bool bHit = Owner->GetWorld()->LineTraceSingleByChannel(
+	bool bHit = Owner->GetWorld()->LineTraceSingleByChannel(
 		Hit, Start, Start + AxisWorld * RayLengthUU, ECC_WheelProbe, Params);
+
+	// A pawn is never ground. The player capsule already ignores this channel;
+	// this guard keeps any future pawn from becoming a springboard (standing
+	// beside a wheel would otherwise read as instant full compression).
+	if (bHit && Hit.GetActor() && Hit.GetActor()->IsA<APawn>())
+	{
+		bHit = false;
+	}
 
 	const FTransform BlockLocal = Owner->GetBlockLocalTransform(*Record);
 	const FQuat BlockLocalQuat = BlockLocal.GetRotation();

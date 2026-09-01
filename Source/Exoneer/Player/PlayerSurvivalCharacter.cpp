@@ -14,6 +14,7 @@
 #include "Engine/Engine.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Vehicles/VehicleConstruct.h"
+#include "Vehicles/ExoneerVehicleUnits.h"
 #include "Interfaces/Pilotable.h"
 #include "EnhancedInputComponent.h"
 #include "EnhancedInputSubsystems.h"
@@ -54,6 +55,17 @@ APlayerSurvivalCharacter::APlayerSurvivalCharacter()
 		CMC->InitialPushForceFactor = 0.f;
 		// Standing weight transfer (the suspension dipping under you) rides
 		// the engine's default standing downward force - no override needed.
+	}
+
+	// A body is not terrain: the wheel suspension probe must never see this
+	// capsule. It traces DOWN from above each wheel, so standing on or beside
+	// a wheel otherwise put the capsule between the ray start and the ground -
+	// the suspension read "ground is right here", slammed to full compression
+	// and fired the spring, launching the wheel and the engineer with it (and
+	// because the fake ground tracked the pawn, it felt magnetic).
+	if (UCapsuleComponent* Capsule = GetCapsuleComponent())
+	{
+		Capsule->SetCollisionResponseToChannel(ECC_WheelProbe, ECR_Ignore);
 	}
 
 	Inventory     = CreateDefaultSubobject<UInventoryComponent>(TEXT("Inventory"));

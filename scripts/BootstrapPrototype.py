@@ -110,6 +110,10 @@ action_specs = {
     "IA_SecondaryAction": BOOL, "IA_OpenInventory": BOOL, "IA_OpenBuildMenu": BOOL,
     "IA_RotateBlock": BOOL, "IA_ConfirmPlace": BOOL, "IA_CancelPlace": BOOL,
     "IA_ToggleTool": BOOL, "IA_EnterExitCockpit": BOOL,
+    # Piloting extras (wheel pass): service brake, handbrake, Flight/Ground
+    # mode toggle, CTIS hold-to-pump tire pressure.
+    "IA_Brake": BOOL, "IA_Handbrake": BOOL, "IA_ToggleControlMode": BOOL,
+    "IA_TirePressureUp": BOOL, "IA_TirePressureDown": BOOL,
 }
 actions = {}
 for name, value_type in action_specs.items():
@@ -142,6 +146,11 @@ BINDINGS = [
     ("IA_CancelPlace", "X", []),
     ("IA_ToggleTool", "Q", []),
     ("IA_EnterExitCockpit", "F", []),
+    ("IA_Brake", "Z", []),
+    ("IA_Handbrake", "LeftControl", []),
+    ("IA_ToggleControlMode", "V", []),
+    ("IA_TirePressureUp", "H", []),
+    ("IA_TirePressureDown", "G", []),
 ]
 
 # UE 5.8 moved the runtime mappings into DefaultKeyMappings; the legacy

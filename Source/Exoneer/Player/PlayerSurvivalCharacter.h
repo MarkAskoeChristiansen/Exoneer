@@ -6,6 +6,7 @@
 #include "Interfaces/Damageable.h"
 #include "Interfaces/InventoryOwner.h"
 #include "ExoneerTypes.h"
+#include "Vehicles/PilotInput.h"
 #include "PlayerSurvivalCharacter.generated.h"
 
 class UCameraComponent;
@@ -85,6 +86,12 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Input") UInputAction* IA_CancelPlace = nullptr;
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Input") UInputAction* IA_ToggleTool = nullptr;
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Input") UInputAction* IA_EnterExitCockpit = nullptr;
+	// Piloting extras (names must match the bootstrap-generated IA assets exactly).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Input") UInputAction* IA_Brake = nullptr;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Input") UInputAction* IA_Handbrake = nullptr;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Input") UInputAction* IA_ToggleControlMode = nullptr;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Input") UInputAction* IA_TirePressureUp = nullptr;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Input") UInputAction* IA_TirePressureDown = nullptr;
 
 	// --- Tunables ---
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Movement") float WalkSpeed = 450.f;
@@ -157,21 +164,42 @@ protected:
 	void Input_CancelPlace(const struct FInputActionValue& Value);
 	void Input_ToggleTool(const struct FInputActionValue& Value);
 	void Input_EnterExitCockpit(const struct FInputActionValue& Value);
+	void Input_BrakeStart(const struct FInputActionValue& Value);
+	void Input_BrakeStop(const struct FInputActionValue& Value);
+	void Input_HandbrakeStart(const struct FInputActionValue& Value);
+	void Input_HandbrakeStop(const struct FInputActionValue& Value);
+	void Input_ToggleControlMode(const struct FInputActionValue& Value);
+	void Input_TirePressureUpStart(const struct FInputActionValue& Value);
+	void Input_TirePressureUpStop(const struct FInputActionValue& Value);
+	void Input_TirePressureDownStart(const struct FInputActionValue& Value);
+	void Input_TirePressureDownStop(const struct FInputActionValue& Value);
 
 	// --- Piloting (client intent -> server; the construct is not connection-owned) ---
 
-	/** Move/rotate intents, batched to ~PilotInputSendHz in Tick. Unreliable: the next send supersedes a lost one. */
+	/**
+	 * Pilot intent packet, batched to ~PilotInputSendHz in Tick. Unreliable:
+	 * the next send supersedes a lost one; held states ride as flags and
+	 * discrete presses as a rolling counter, so neither is lost to timing.
+	 */
 	UFUNCTION(Server, Unreliable, WithValidation)
-	void Server_SendPilotInput(AVehicleConstruct* Construct, FVector Move, FVector Rotate);
+	void Server_SendPilotInput(AVehicleConstruct* Construct, FPilotInput Input);
 
 	/** Leave the cockpit. Reliable: a lost exit would strand the pilot. */
 	UFUNCTION(Server, Reliable, WithValidation)
 	void Server_ExitPilot();
 
-	/** Local intent accumulated between the throttled sends. */
-	FVector PendingPilotMove = FVector::ZeroVector;
-	FVector PendingPilotRotate = FVector::ZeroVector;
+	/** Axis samples for the current send window (zeroed after each send). */
+	FPilotInput PendingPilotInput;
 	float PilotSendAccumulator = 0.f;
+
+	/** Held key states, sampled into the packet at send time (never zeroed by sends). */
+	bool bBrakeHeld = false;
+	bool bHandbrakeHeld = false;
+	bool bTirePressureUpHeld = false;
+	bool bTirePressureDownHeld = false;
+
+	/** Rolling 2-bit counter of control-mode toggle presses. */
+	uint8 ModeTogglePressCounter = 0;
 
 	/** Current QuickBar selection (debug build-menu cycling). */
 	int32 QuickBarIndex = INDEX_NONE;

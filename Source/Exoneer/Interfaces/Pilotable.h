@@ -3,6 +3,7 @@
 
 #include "CoreMinimal.h"
 #include "UObject/Interface.h"
+#include "Vehicles/PilotInput.h"
 #include "Pilotable.generated.h"
 
 UINTERFACE(BlueprintType, MinimalAPI)
@@ -30,8 +31,8 @@ public:
 	void ExitPilot(APawn* Pilot);
 	virtual void ExitPilot_Implementation(APawn* Pilot) {}
 
-	/** SERVER. Desired movement in the pilot's local frame; consumed by the physics tick. */
+	/** SERVER. Pilot intent packet (held until the next one or a timeout); consumed by the physics tick. */
 	UFUNCTION(BlueprintNativeEvent, Category = "Exoneer|Vehicle")
-	void ApplyPilotInput(const FVector& MoveInput, const FVector& RotateInput);
-	virtual void ApplyPilotInput_Implementation(const FVector& MoveInput, const FVector& RotateInput) {}
+	void ApplyPilotInput(const FPilotInput& Input);
+	virtual void ApplyPilotInput_Implementation(const FPilotInput& Input) {}
 };

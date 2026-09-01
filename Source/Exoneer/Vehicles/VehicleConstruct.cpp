@@ -154,6 +154,7 @@ void AVehicleConstruct::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& Ou
 	DOREPLIFETIME(AVehicleConstruct, PowerSupplyFraction);
 	DOREPLIFETIME(AVehicleConstruct, PilotPawn);
 	DOREPLIFETIME(AVehicleConstruct, ActiveCockpitId);
+	DOREPLIFETIME(AVehicleConstruct, ControlMode);
 }
 
 // --- Queries ---
@@ -812,19 +813,40 @@ float AVehicleConstruct::DeconstructAt_Implementation(AActor* Builder, UInventor
 
 // --- Piloting ---
 
-void AVehicleConstruct::SetPilotInput(const FVector& MoveInput, const FVector& RotateInput)
+void AVehicleConstruct::SetPilotInput(const FPilotInput& Input)
 {
 	if (!HasAuthority())
 	{
 		return;
 	}
-	PendingMove = MoveInput.GetClampedToMaxSize(1.f);
-	PendingRotate = RotateInput.GetClampedToMaxSize(1.f);
+	PilotInput = Input;
+	PilotInput.Sanitize();
+	LastPilotInputServerTime = GetWorld()->GetTimeSeconds();
+
+	// Mode toggle rides a rolling 2-bit counter so presses between 20 Hz sends
+	// latch losslessly. The first packet after a seating only adopts the
+	// client's current counter (its value is arbitrary at that point).
+	if (bModeToggleSyncPending)
+	{
+		bModeToggleSyncPending = false;
+		LastProcessedModeToggle = PilotInput.ModeToggleCount;
+	}
+	else
+	{
+		const uint8 Presses = (PilotInput.ModeToggleCount - LastProcessedModeToggle) & 0x3;
+		LastProcessedModeToggle = PilotInput.ModeToggleCount;
+		if (Presses % 2 == 1)
+		{
+			ControlMode = ControlMode == EPilotControlMode::Flight
+				? EPilotControlMode::Ground
+				: EPilotControlMode::Flight;
+		}
+	}
 }
 
-void AVehicleConstruct::ApplyPilotInput_Implementation(const FVector& MoveInput, const FVector& RotateInput)
+void AVehicleConstruct::ApplyPilotInput_Implementation(const FPilotInput& Input)
 {
-	SetPilotInput(MoveInput, RotateInput);
+	SetPilotInput(Input);
 }
 
 bool AVehicleConstruct::EnterPilot_Implementation(APawn* Pilot, int32 StationId)
@@ -851,6 +873,12 @@ bool AVehicleConstruct::EnterPilot_Implementation(APawn* Pilot, int32 StationId)
 
 	PilotPawn = Pilot;
 	ActiveCockpitId = StationId;
+
+	// Fresh seat: adopt the pilot's rolling toggle counter on the first packet
+	// instead of interpreting its arbitrary current value as presses.
+	bModeToggleSyncPending = true;
+	PilotInput = FPilotInput();
+	LastPilotInputServerTime = -1.0;
 
 	// Seat the pawn: attach to the root, then snap to the cockpit block. The
 	// character's own movement simulation and capsule collision must sleep
@@ -895,8 +923,8 @@ void AVehicleConstruct::ExitPilot_Implementation(APawn* Pilot)
 	APawn* Leaving = PilotPawn;
 	PilotPawn = nullptr;
 	ActiveCockpitId = INDEX_NONE;
-	PendingMove = FVector::ZeroVector;
-	PendingRotate = FVector::ZeroVector;
+	PilotInput = FPilotInput();
+	LastPilotInputServerTime = -1.0;
 
 	if (IsValid(Leaving))
 	{
@@ -1003,11 +1031,18 @@ void AVehicleConstruct::Tick(float DeltaSeconds)
 		ServerRouteThrust(DeltaSeconds);
 		ServerTickModules(DeltaSeconds);
 
-		// Intents decay quickly so the craft coasts to neutral when the pilot
-		// input RPC stream stops.
-		const float Decay = FMath::Clamp(1.f - DeltaSeconds * 8.f, 0.f, 1.f);
-		PendingMove *= Decay;
-		PendingRotate *= Decay;
+		// Hold the last pilot packet until the next one arrives; past the
+		// timeout (pilot lag/disconnect) zero the axes and engage the parking
+		// brake. This replaces the old per-tick decay, which sagged intents
+		// ~40 percent between 20 Hz sends and made held throttle mushy.
+		const bool bInputTimedOut = LastPilotInputServerTime < 0.0
+			|| GetWorld()->GetTimeSeconds() - LastPilotInputServerTime > PilotInputTimeoutSeconds;
+		if (bInputTimedOut)
+		{
+			PilotInput.ZeroAxes();
+		}
+		bParkingBrakeEngaged = bInputTimedOut || !PilotPawn
+			|| (PilotInput.HeldFlags & EPilotHeldFlags::Handbrake) != 0;
 	}
 }
 
@@ -1165,7 +1200,7 @@ void AVehicleConstruct::ServerRouteThrust(float DeltaSeconds)
 	if (PilotPawn && Cockpit)
 	{
 		CockpitQuat = GetActorQuat() * ExoneerVehicleOrientation::GetQuat(Cockpit->Orientation);
-		DesiredWorld = CockpitQuat.RotateVector(PendingMove);
+		DesiredWorld = CockpitQuat.RotateVector(PilotInput.Move);
 		if (!DesiredWorld.IsNearlyZero())
 		{
 			DesiredWorld = DesiredWorld.GetSafeNormal();
@@ -1202,17 +1237,20 @@ void AVehicleConstruct::ServerRouteThrust(float DeltaSeconds)
 		}
 	}
 
-	// Cockpit gyro torque, scaled by total rigid body mass. PendingRotate is
+	// Cockpit gyro torque, scaled by total rigid body mass. Rotate intent is
 	// (pitch, yaw, roll): pitch turns about the cockpit RIGHT axis, yaw about
 	// UP, roll about FORWARD - not a raw vector rotation of the intent.
-	if (PilotPawn && Cockpit && !PendingRotate.IsNearlyZero())
+	// Ground mode gates the gyro (default fully off): a rover gets no free
+	// mid-air attitude authority; steering comes from the wheels.
+	const float GyroFraction = ControlMode == EPilotControlMode::Ground ? GroundModeGyroFraction : 1.f;
+	if (PilotPawn && Cockpit && GyroFraction > KINDA_SMALL_NUMBER && !PilotInput.Rotate.IsNearlyZero())
 	{
-		const FVector Rotate = PendingRotate.GetClampedToMaxSize(1.f);
+		const FVector Rotate = PilotInput.Rotate.GetClampedToMaxSize(1.f);
 		const FVector TorqueWorld =
 			CockpitQuat.GetAxisY() * Rotate.X +   // pitch
 			CockpitQuat.GetAxisZ() * Rotate.Y +   // yaw
 			CockpitQuat.GetAxisX() * Rotate.Z;    // roll
-		PhysicsRoot->AddTorqueInRadians(TorqueWorld * RotationTorquePerKg * PhysicsRoot->GetMass());
+		PhysicsRoot->AddTorqueInRadians(TorqueWorld * RotationTorquePerKg * PhysicsRoot->GetMass() * GyroFraction);
 	}
 }
 

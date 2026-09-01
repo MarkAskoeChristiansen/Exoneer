@@ -90,9 +90,12 @@ void APlayerSurvivalCharacter::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
 
-	// While seated, ship the accumulated pilot intent at ~PilotInputSendHz.
-	// A steady stream (zero vectors included) lets the construct stop cleanly
-	// when keys are released; the RPC is unreliable, the next send supersedes.
+	// While seated, ship the pilot packet at ~PilotInputSendHz. A steady
+	// stream (zero axes included) lets the construct stop cleanly when keys
+	// are released; the RPC is unreliable, the next send supersedes. The
+	// server HOLDS the last packet between sends (no decay), so axes are
+	// per-window samples while held states and the mode-toggle counter are
+	// sampled fresh at send time and survive packet timing.
 	if (PilotedConstruct && IsLocallyControlled())
 	{
 		PilotSendAccumulator += DeltaSeconds;
@@ -100,9 +103,15 @@ void APlayerSurvivalCharacter::Tick(float DeltaSeconds)
 		if (PilotSendAccumulator >= SendInterval)
 		{
 			PilotSendAccumulator = 0.f;
-			Server_SendPilotInput(PilotedConstruct, PendingPilotMove, PendingPilotRotate);
-			PendingPilotMove = FVector::ZeroVector;
-			PendingPilotRotate = FVector::ZeroVector;
+			FPilotInput Packet = PendingPilotInput;
+			Packet.Brake = bBrakeHeld ? 1.f : 0.f;
+			Packet.HeldFlags =
+				(bHandbrakeHeld ? EPilotHeldFlags::Handbrake : 0)
+				| (bTirePressureUpHeld ? EPilotHeldFlags::CtisUp : 0)
+				| (bTirePressureDownHeld ? EPilotHeldFlags::CtisDown : 0);
+			Packet.ModeToggleCount = ModeTogglePressCounter & 0x3;
+			Server_SendPilotInput(PilotedConstruct, Packet);
+			PendingPilotInput = FPilotInput();
 		}
 	}
 }
@@ -162,6 +171,15 @@ void APlayerSurvivalCharacter::SetupPlayerInputComponent(UInputComponent* Player
 	Bind(IA_CancelPlace,      ETriggerEvent::Started,    &APlayerSurvivalCharacter::Input_CancelPlace);
 	Bind(IA_ToggleTool,       ETriggerEvent::Started,    &APlayerSurvivalCharacter::Input_ToggleTool);
 	Bind(IA_EnterExitCockpit, ETriggerEvent::Started,    &APlayerSurvivalCharacter::Input_EnterExitCockpit);
+	Bind(IA_Brake,            ETriggerEvent::Started,    &APlayerSurvivalCharacter::Input_BrakeStart);
+	Bind(IA_Brake,            ETriggerEvent::Completed,  &APlayerSurvivalCharacter::Input_BrakeStop);
+	Bind(IA_Handbrake,        ETriggerEvent::Started,    &APlayerSurvivalCharacter::Input_HandbrakeStart);
+	Bind(IA_Handbrake,        ETriggerEvent::Completed,  &APlayerSurvivalCharacter::Input_HandbrakeStop);
+	Bind(IA_ToggleControlMode, ETriggerEvent::Started,   &APlayerSurvivalCharacter::Input_ToggleControlMode);
+	Bind(IA_TirePressureUp,   ETriggerEvent::Started,    &APlayerSurvivalCharacter::Input_TirePressureUpStart);
+	Bind(IA_TirePressureUp,   ETriggerEvent::Completed,  &APlayerSurvivalCharacter::Input_TirePressureUpStop);
+	Bind(IA_TirePressureDown, ETriggerEvent::Started,    &APlayerSurvivalCharacter::Input_TirePressureDownStart);
+	Bind(IA_TirePressureDown, ETriggerEvent::Completed,  &APlayerSurvivalCharacter::Input_TirePressureDownStop);
 }
 
 void APlayerSurvivalCharacter::Input_Move(const FInputActionValue& Value)
@@ -169,9 +187,16 @@ void APlayerSurvivalCharacter::Input_Move(const FInputActionValue& Value)
 	const FVector2D Axis = Value.Get<FVector2D>();
 	if (PilotedConstruct)
 	{
-		// Pilot frame: X forward, Y right; Z comes from jump (thrust up).
-		PendingPilotMove.X = Axis.Y;
-		PendingPilotMove.Y = Axis.X;
+		if (PilotedConstruct->GetControlMode() == EPilotControlMode::Ground)
+		{
+			// Ground driving: W/S is drive throttle, A/D is steer.
+			PendingPilotInput.Throttle = Axis.Y;
+			PendingPilotInput.Steer = Axis.X;
+			return;
+		}
+		// Flight frame: X forward, Y right; Z comes from jump (thrust up).
+		PendingPilotInput.Move.X = Axis.Y;
+		PendingPilotInput.Move.Y = Axis.X;
 		return;
 	}
 	if (!Controller) return;
@@ -185,13 +210,14 @@ void APlayerSurvivalCharacter::Input_Move(const FInputActionValue& Value)
 void APlayerSurvivalCharacter::Input_Look(const FInputActionValue& Value)
 {
 	const FVector2D Axis = Value.Get<FVector2D>();
-	if (PilotedConstruct)
+	if (PilotedConstruct && PilotedConstruct->GetControlMode() == EPilotControlMode::Flight)
 	{
-		// Rotate intent as (pitch, yaw, roll); the camera stays seat-locked.
-		PendingPilotRotate.X = -Axis.Y;
-		PendingPilotRotate.Y = Axis.X;
+		// Flight: rotate intent as (pitch, yaw, roll); camera stays seat-locked.
+		PendingPilotInput.Rotate.X = -Axis.Y;
+		PendingPilotInput.Rotate.Y = Axis.X;
 		return;
 	}
+	// On foot, and Ground-mode piloting: the mouse is a free-look camera.
 	AddControllerYawInput(Axis.X);
 	AddControllerPitchInput(-Axis.Y);
 }
@@ -200,7 +226,10 @@ void APlayerSurvivalCharacter::Input_Jump(const FInputActionValue&)
 {
 	if (PilotedConstruct)
 	{
-		PendingPilotMove.Z = 1.f;
+		if (PilotedConstruct->GetControlMode() == EPilotControlMode::Flight)
+		{
+			PendingPilotInput.Move.Z = 1.f;   // held = up-thrust
+		}
 		return;
 	}
 	Jump();
@@ -330,6 +359,24 @@ void APlayerSurvivalCharacter::Input_EnterExitCockpit(const FInputActionValue&)
 	}
 }
 
+void APlayerSurvivalCharacter::Input_BrakeStart(const FInputActionValue&)   { bBrakeHeld = true; }
+void APlayerSurvivalCharacter::Input_BrakeStop(const FInputActionValue&)    { bBrakeHeld = false; }
+void APlayerSurvivalCharacter::Input_HandbrakeStart(const FInputActionValue&) { bHandbrakeHeld = true; }
+void APlayerSurvivalCharacter::Input_HandbrakeStop(const FInputActionValue&)  { bHandbrakeHeld = false; }
+void APlayerSurvivalCharacter::Input_TirePressureUpStart(const FInputActionValue&)   { bTirePressureUpHeld = true; }
+void APlayerSurvivalCharacter::Input_TirePressureUpStop(const FInputActionValue&)    { bTirePressureUpHeld = false; }
+void APlayerSurvivalCharacter::Input_TirePressureDownStart(const FInputActionValue&) { bTirePressureDownHeld = true; }
+void APlayerSurvivalCharacter::Input_TirePressureDownStop(const FInputActionValue&)  { bTirePressureDownHeld = false; }
+
+void APlayerSurvivalCharacter::Input_ToggleControlMode(const FInputActionValue&)
+{
+	if (PilotedConstruct)
+	{
+		// Rolling counter: the press latches even if it lands between sends.
+		ModeTogglePressCounter = (ModeTogglePressCounter + 1) & 0x3;
+	}
+}
+
 void APlayerSurvivalCharacter::CycleToolMode()
 {
 	switch (ToolMode)
@@ -372,28 +419,29 @@ void APlayerSurvivalCharacter::SetPilotedConstruct(AVehicleConstruct* Construct)
 	PilotedConstruct = Construct;
 
 	// Reset the local intent so a listen host does not carry stale input
-	// across seatings; remote clients reset when their next send fires.
-	PendingPilotMove = FVector::ZeroVector;
-	PendingPilotRotate = FVector::ZeroVector;
+	// across seatings; remote clients reset when their next send fires. The
+	// mode-toggle counter deliberately survives: the construct adopts its
+	// current value on the first packet after a fresh seating.
+	PendingPilotInput = FPilotInput();
 	PilotSendAccumulator = 0.f;
 }
 
-bool APlayerSurvivalCharacter::Server_SendPilotInput_Validate(AVehicleConstruct* Construct, FVector Move, FVector Rotate)
+bool APlayerSurvivalCharacter::Server_SendPilotInput_Validate(AVehicleConstruct* Construct, FPilotInput Input)
 {
 	// Never gate on pilot state here: unreliable input packets race every
 	// cockpit exit (client keeps streaming for >= 1 RTT after the server
 	// unseated it), and a _Validate failure DISCONNECTS the client. The
 	// implementation already drops input that no longer matches the seat.
-	// Reject only what an honest client can never send: non-finite vectors.
-	return !Move.ContainsNaN() && !Rotate.ContainsNaN();
+	// Reject only what an honest client can never send: non-finite values.
+	return !Input.ContainsNaN();
 }
 
-void APlayerSurvivalCharacter::Server_SendPilotInput_Implementation(AVehicleConstruct* Construct, FVector Move, FVector Rotate)
+void APlayerSurvivalCharacter::Server_SendPilotInput_Implementation(AVehicleConstruct* Construct, FPilotInput Input)
 {
 	if (IsValid(Construct) && PilotedConstruct == Construct)
 	{
-		// Sanitize per axis: intents are throttles in -1..1, not directions.
-		Construct->SetPilotInput(Move.BoundToCube(1.f), Rotate.BoundToCube(1.f));
+		// SetPilotInput sanitizes every axis to its documented range.
+		Construct->SetPilotInput(Input);
 	}
 }
 

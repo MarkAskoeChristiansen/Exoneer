@@ -135,6 +135,16 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Vehicle") float RotationTorquePerKg = 800.f;
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Vehicle") int32 ScrapInsteadOfSplitMaxBlocks = 1;
 
+	/** Server holds the last pilot packet this long; past it, axes zero and the parking brake engages. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Vehicle") float PilotInputTimeoutSeconds = 0.5f;
+
+	/**
+	 * Gyro torque multiplier while in Ground control mode. 0 by default: a
+	 * rover in the air is ballistic; free attitude authority is a Flight-mode
+	 * (thruster craft) legacy, flagged in the scope gap map.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Vehicle") float GroundModeGyroFraction = 0.f;
+
 	// --- Replicated state ---
 	UPROPERTY(Replicated, VisibleAnywhere, BlueprintReadOnly, Category = "Vehicle")
 	float PowerSupplyFraction = 1.f;
@@ -144,6 +154,17 @@ public:
 
 	UPROPERTY(Replicated, VisibleAnywhere, BlueprintReadOnly, Category = "Vehicle")
 	int32 ActiveCockpitId = INDEX_NONE;
+
+	/** How pilot input is interpreted; toggled by the pilot (V). Ground gates the gyro. */
+	UPROPERTY(Replicated, VisibleAnywhere, BlueprintReadOnly, Category = "Vehicle")
+	EPilotControlMode ControlMode = EPilotControlMode::Flight;
+
+	UFUNCTION(BlueprintPure, Category = "Vehicle")
+	EPilotControlMode GetControlMode() const { return ControlMode; }
+
+	/** SERVER. True when the handbrake is held, input timed out, or no pilot is seated. Wheels hold against it. */
+	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category = "Vehicle")
+	bool bParkingBrakeEngaged = true;
 
 	UPROPERTY(BlueprintAssignable) FOnVehicleBlocksChanged OnBlocksChanged;
 
@@ -188,8 +209,8 @@ public:
 	/** Sun fraction pull-through for solar modules (0 when no env manager). */
 	float GetSunFraction() const;
 
-	/** SERVER. Pilot input intents, forwarded by the pilot's character RPC. */
-	void SetPilotInput(const FVector& MoveInput, const FVector& RotateInput);
+	/** SERVER. Pilot input packet, forwarded by the pilot's character RPC. Held until the next packet or timeout. */
+	void SetPilotInput(const FPilotInput& Input);
 
 	/**
 	 * SERVER. Overwrite one record's construction/health fields (save-load
@@ -202,7 +223,7 @@ public:
 	// IPilotable
 	virtual bool EnterPilot_Implementation(APawn* Pilot, int32 StationId) override;
 	virtual void ExitPilot_Implementation(APawn* Pilot) override;
-	virtual void ApplyPilotInput_Implementation(const FVector& MoveInput, const FVector& RotateInput) override;
+	virtual void ApplyPilotInput_Implementation(const FPilotInput& Input) override;
 
 	// IInteractable (interact = enter/exit nearest cockpit)
 	virtual bool OnInteract_Implementation(AActor* Interactor) override;
@@ -242,8 +263,15 @@ protected:
 	int32 NextBlockInstanceId = 0;
 	bool bVisualsDirty = false;
 
-	FVector PendingMove = FVector::ZeroVector;
-	FVector PendingRotate = FVector::ZeroVector;
+	/** SERVER. Last received pilot packet, held until superseded or timed out. */
+	FPilotInput PilotInput;
+
+	/** SERVER. World seconds of the last received packet; < 0 = none yet. */
+	double LastPilotInputServerTime = -1.0;
+
+	/** SERVER. Rolling-counter bookkeeping for the mode toggle. */
+	uint8 LastProcessedModeToggle = 0;
+	bool bModeToggleSyncPending = true;
 
 	UFUNCTION() void OnRep_Pilot();
 

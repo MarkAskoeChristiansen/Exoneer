@@ -8,7 +8,8 @@
 /**
  * Stores energy for the structure's power network. Storage capacity comes
  * from Def->EnergyStorage; charge/discharge is simulated centrally by the
- * UPowerNetworkComponent on the owning ABaseStructure.
+ * UPowerNetworkComponent on the owning ABaseStructure. Suit recharge is the
+ * umbilical port, not a radius around this bank.
  */
 UCLASS(BlueprintType, Blueprintable)
 class EXONEER_API ABatteryPiece : public AMachinePiece
@@ -21,21 +22,6 @@ public:
 	/** Fill fraction below which the battery reports LowPower (HUD/VFX). */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Machine", meta = (ClampMin = "0", ClampMax = "1"))
 	float LowChargeFraction = 0.05f;
-
-	// --- Umbilical prototype (GAME-SCOPE.md module 1): standing near a charged
-	// battery bank recharges the engineer's suit from stored energy. ---
-
-	/** Radius (cm) within which suits recharge. 0 disables. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Machine")
-	float SuitRechargeRadius = 350.f;
-
-	/** Suit power restored per second per engineer in range. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Machine")
-	float SuitRechargePerSec = 6.f;
-
-	/** Watt-seconds of stored energy consumed per suit power unit. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Machine")
-	float EnergyPerSuitUnit = 100.f;
 
 	virtual void Tick(float DeltaSeconds) override;
 };

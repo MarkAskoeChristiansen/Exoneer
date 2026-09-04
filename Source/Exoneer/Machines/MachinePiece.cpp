@@ -7,6 +7,7 @@
 #include "Components/CraftingComponent.h"
 #include "Data/PieceDefinitionDataAsset.h"
 #include "Data/ItemDefinitionDataAsset.h"
+#include "Maintenance/ExoneerMaintenance.h"
 #include "ExoneerGameplayTags.h"
 #include "Engine/AssetManager.h"
 #include "Engine/Engine.h"
@@ -99,12 +100,58 @@ void AMachinePiece::ApplyDefinitionStats()
 		// PowerDelta: positive produces, negative consumes.
 		Power->NominalDraw = Def->PowerDelta < 0.f ? -Def->PowerDelta : 0.f;
 		Power->NominalOutput = Def->PowerDelta > 0.f ? Def->PowerDelta : 0.f;
-		Power->StorageCapacity = Def->EnergyStorage;
+		// A faded pack holds fewer joules. The rating stays in the definition;
+		// what the network sees is what the cells can still take.
+		Power->StorageCapacity = ExoneerMaintenance::EffectiveCapacityJ(Def->EnergyStorage, Condition.CapacityFade01);
+		Power->StoredEnergy = FMath::Clamp(Power->StoredEnergy, 0.f, Power->StorageCapacity);
 	}
 	if (Inventory)
 	{
 		Inventory->MaxCapacity = Def->InventoryCapacity;
 	}
+}
+
+float AMachinePiece::GetEffectiveEnergyStorageJ() const
+{
+	return Def ? ExoneerMaintenance::EffectiveCapacityJ(Def->EnergyStorage, Condition.CapacityFade01) : 0.f;
+}
+
+void AMachinePiece::ApplyEnergyThroughput(float ThroughputJ, float AmbientC)
+{
+	if (!HasAuthority() || !Def || Def->EnergyStorage <= 0.f || ThroughputJ <= 0.f)
+	{
+		return;
+	}
+	if (ExoneerMaintenance::IsCapacityTerminal(Condition.CapacityFade01))
+	{
+		return;   // at the floor: the pack has nothing left to lose
+	}
+
+	PendingCapacityFade += ExoneerMaintenance::CapacityFadeDelta(ThroughputJ, Def->EnergyStorage, AmbientC);
+	if (PendingCapacityFade < ExoneerMaintenance::CapacityFadeDeadband)
+	{
+		return;
+	}
+	Condition.CapacityFade01 = ExoneerMaintenance::ApplyCapacityFade(Condition.CapacityFade01, PendingCapacityFade);
+	PendingCapacityFade = 0.f;
+
+	// The derated capacity is what the next sim step charges into, so it has
+	// to be re-applied here: ApplyDefinitionStats otherwise only runs at
+	// BeginPlay and on completion.
+	ApplyDefinitionStats();
+}
+
+void AMachinePiece::ResetConditionToNominal()
+{
+	Super::ResetConditionToNominal();
+	PendingCapacityFade = 0.f;
+	// Rated storage comes back with the new cell; the joules in the old one
+	// left with it, so the pack restarts empty.
+	if (Power)
+	{
+		Power->StoredEnergy = 0.f;
+	}
+	ApplyDefinitionStats();
 }
 
 void AMachinePiece::UpdateMachineState(EMachineState NewState)

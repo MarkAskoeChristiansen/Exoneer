@@ -25,17 +25,27 @@ namespace ExoneerWheelSim
 		float RestLengthM = 0.30f;
 		float TravelM = 0.18f;
 		float BumpStopNPerM = 400000.f;
+		float BumpStopTravelM = 0.05f;
 		float WheelInertiaKgM2 = 1.f;
 		float StallTorqueNm = 0.f;          // 0 for undriven wheels
 		float NoLoadSpeedRadS = 40.f;
 		float Efficiency = 0.85f;
 		float CopperLossAtStallW = 2000.f;
+		/** Controller electronics draw (W); part of the winding's heat input. */
+		float ControllerIdleDrawW = 20.f;
 		float MaxBrakeTorqueNm = 600.f;
 		float RollingResistRigid = 0.008f;
 		float RollingResistFlexible = 0.015f;
 		float BearingDragNm = 1.5f;
 		/** Fraction of soil shear strength the tread mobilises (grouser effect). */
 		float TreadMobilisation = 0.8f;
+		/** Share of the rubber-on-hard-surface friction the tread develops (no soil to shear). */
+		float HardSurfaceGrip = 1.f;
+		/** Tread shear deformation moduli on a hard surface (m) - rubber, not soil. */
+		float TreadShearModulusM = 0.0025f;
+		float TreadShearModulusLateralM = 0.003f;
+		/** Contact speed below which the patch is solved as stuck (m/s). */
+		float StickSpeedMS = 0.05f;
 	};
 
 	/** Per-frame commands and tire state (game-thread authored, sample-held over substeps). */
@@ -76,9 +86,30 @@ namespace ExoneerWheelSim
 	{
 		float OmegaRadS = 0.f;
 		float PrevSlipAbs = 0.f;
-		float PrevRadialDropM = 0.f;   // z (rigid) or tire deflection (flexible), one-substep lag
+
+		/**
+		 * TWO radial drops, deliberately named apart so a later change cannot
+		 * quietly merge them again. Both carry a one-substep lag and the same
+		 * low-pass.
+		 *
+		 * SOLVED - what the contact mechanics ride on: tire deflection PLUS
+		 * sinkage for a flexible tire, sinkage alone for a rigid one. The
+		 * compaction, bulldozing and rut-drag terms are charged against
+		 * exactly that geometry, so the solve must use it or the model
+		 * contradicts itself.
+		 *
+		 * VISUAL - what the DRAWN hub rides on: tire deflection only. Sinkage
+		 * is the wheel sitting in a rut that is not rendered, so folding it
+		 * into the drawn hub buries the wheel in an undisturbed surface (on
+		 * sand that is about 53 mm of it). Fold sinkage back in here once rut
+		 * rendering exists.
+		 */
+		float PrevSolvedRadialDropM = 0.f;
+		float PrevVisualRadialDropM = 0.f;
+
 		bool bPrevRigid = true;
-		float CompressionM = 0.f;
+		/** Strut compression the suspension force was solved from (m). */
+		float SolvedCompressionM = 0.f;
 	};
 
 	/** Per-frame telemetry marshaled back to the game thread. */
@@ -88,10 +119,20 @@ namespace ExoneerWheelSim
 		float OmegaRadS = 0.f;
 		float SlipRatioAbs = 0.f;
 		float SinkageM = 0.f;
-		float CompressionM = 0.f;
+		/**
+		 * Strut compression for DRAWING and for the replicated quantum (m):
+		 * tire squash only, no rut. See FWheelSimState for why the solved and
+		 * the visual radial drop are two different quantities.
+		 */
+		float VisualCompressionM = 0.f;
 		float NormalLoadN = 0.f;
+		/** Tangential force actually developed in the patch this step (N). */
+		float ShearForceN = 0.f;
+		/** Resultant sliding speed of the patch over the ground (m/s). */
+		float SlipSpeedMS = 0.f;
 		float DriveTorqueNm = 0.f;
 		float ElectricalPowerW = 0.f;   // this step's motor draw (mech/eta + copper loss)
+		float LossPowerW = 0.f;         // heat into the winding: losses only, never shaft work
 		bool bInContact = false;
 	};
 
@@ -102,10 +143,53 @@ namespace ExoneerWheelSim
 		FVector LinearVelocityUU = FVector::ZeroVector;   // at CoM, UU/s
 		FVector AngularVelocityRad = FVector::ZeroVector; // world, rad/s
 		FVector ComWorldUU = FVector::ZeroVector;
+		/** Mass (kg) and the number of wheels sharing the body between them. */
+		float MassKg = 1000.f;
+		int32 WheelCount = 1;
+		/** World rotation of the principal-inertia frame, and 1/I about those axes (kg*cm^2). */
+		FQuat ComRotation = FQuat::Identity;
+		FVector InvInertiaDiag = FVector::ZeroVector;
 
 		FVector PointVelocityUU(const FVector& PointUU) const
 		{
 			return LinearVelocityUU + FVector::CrossProduct(AngularVelocityRad, PointUU - ComWorldUU);
+		}
+
+		/** World-space I^-1 applied to an angular impulse. */
+		FVector ApplyInvInertia(const FVector& AngularUU) const
+		{
+			return ComRotation.RotateVector(ComRotation.UnrotateVector(AngularUU) * InvInertiaDiag);
+		}
+
+		/**
+		 * Mass (kg) the body presents at a contact point along a unit direction:
+		 *   1 / m_eff = 1/m + n . ((I^-1 (r x n)) x r)
+		 * the standard contact effective mass. Lengths cancel between r and I,
+		 * so it is computed directly in UU. The angular half matters: a sideways
+		 * force half a metre below the centre of mass also ROLLS the body, so it
+		 * cannot arrest the sliding as fast as the bare mass suggests. Using the
+		 * bare mass instead lets a set of widely spaced wheels apply more angular
+		 * impulse than the body's own inertia can absorb, which rings - exactly
+		 * the class of overshoot that produced the creep in the first place.
+		 */
+		float EffectiveMassAt(const FVector& PointUU, const FVector& DirW) const
+		{
+			const FVector R = PointUU - ComWorldUU;
+			const FVector AngularTerm = FVector::CrossProduct(
+				ApplyInvInertia(FVector::CrossProduct(R, DirW)), R);
+			const float InvEffective = 1.f / FMath::Max(MassKg, 1e-3f)
+				+ FMath::Max(FVector::DotProduct(DirW, AngularTerm), 0.f);
+			return 1.f / FMath::Max(InvEffective, 1e-9f);
+		}
+
+		/**
+		 * That effective mass divided between the wheels that share the body.
+		 * One wheel solving its own contact in isolation would arrest the whole
+		 * body; N of them doing it at once would arrest it N times over.
+		 */
+		float ContactMassShareKg(const FVector& PointUU, const FVector& DirW) const
+		{
+			return EffectiveMassAt(PointUU, DirW) / FMath::Max((float)WheelCount, 1.f);
 		}
 	};
 

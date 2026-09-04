@@ -11,8 +11,8 @@ class UOxygenComponent;
 /**
  * Produces oxygen while powered: a passive baseline of
  * Def->OxygenProductionPerSec into its UOxygenComponent reservoir, plus
- * ice-to-oxygen-item conversion through the crafting queue. Players refuel
- * their suits from the reservoir (server-side, via the interaction pipeline).
+ * ice-to-oxygen-item conversion through the crafting queue. Suits refill
+ * from this reservoir only through an umbilical port on the same structure.
  */
 UCLASS(BlueprintType, Blueprintable)
 class EXONEER_API AOxygenGeneratorPiece : public AMachinePiece

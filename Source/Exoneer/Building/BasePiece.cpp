@@ -7,6 +7,11 @@
 #include "Engine/StaticMesh.h"
 #include "Materials/MaterialInterface.h"
 #include "Net/UnrealNetwork.h"
+#include "Maintenance/ExoneerMaintenance.h"
+#include "Vehicles/ExoneerVehicleUnits.h"   // ECC_WheelProbe
+#include "Components/InventoryComponent.h"
+#include "Data/ItemDefinitionDataAsset.h"
+#include "Engine/AssetManager.h"
 
 ABasePiece::ABasePiece()
 {
@@ -36,6 +41,8 @@ void ABasePiece::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifeti
 	DOREPLIFETIME(ABasePiece, ParentSocket);
 	DOREPLIFETIME(ABasePiece, Health);
 	DOREPLIFETIME(ABasePiece, SupportValue);
+	DOREPLIFETIME(ABasePiece, Condition);
+	DOREPLIFETIME(ABasePiece, LastLoadN);
 }
 
 void ABasePiece::BeginPlay()
@@ -132,6 +139,11 @@ void ABasePiece::RefreshVisualState()
 	{
 		Mesh->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
 		Mesh->SetCollisionResponseToChannel(ECC_Pawn, ECR_Overlap);
+		// A ghost is a planning marker, not ground. The wheel probe channel
+		// defaults to Block, so without this an unbuilt deck caught a wheel:
+		// the suspension found a plane it could stand on, and the piece was
+		// asked to carry a load it has not been welded to carry.
+		Mesh->SetCollisionResponseToChannel(ECC_WheelProbe, ECR_Ignore);
 	}
 	else
 	{
@@ -233,13 +245,38 @@ float ABasePiece::GetConstructionProgressAt_Implementation(const FVector& WorldP
 	return Construction ? Construction->GetTotalProgress01() : 1.f;
 }
 
-float ABasePiece::InvestConstruction_Implementation(AActor* Builder, UInventoryComponent* SourceInventory, const FVector& WorldPoint, float WeldPoints)
+int32 ABasePiece::GetConstructionTargetIdAt_Implementation(const FVector& WorldPoint) const
 {
+	// Whole-actor construction: one target or none, so WorldPoint decides nothing.
+	return Construction ? ExoneerConstruction::WholeActorTargetId : ExoneerConstruction::NoTargetId;
+}
+
+float ABasePiece::GetConstructionProgressForTarget_Implementation(int32 TargetId) const
+{
+	// A piece with no construction component, or an id from some other actor,
+	// is "unknown" - not "finished". UConstructionComponent::InvestWork has no
+	// equivalent ambiguity of its own: the component IS the single target, so
+	// the identity is decided here, at the actor that owns it.
+	if (!Construction || TargetId != ExoneerConstruction::WholeActorTargetId)
+	{
+		return ExoneerConstruction::UnknownProgress;
+	}
+	return Construction->GetTotalProgress01();
+}
+
+float ABasePiece::InvestConstruction_Implementation(AActor* Builder, UInventoryComponent* SourceInventory, const FVector& WorldPoint, float WeldPoints, int32& OutTargetId)
+{
+	OutTargetId = ExoneerConstruction::NoTargetId;
 	if (!HasAuthority() || !Construction)
 	{
 		return 0.f;
 	}
-	return Construction->InvestWork(SourceInventory, WeldPoints);
+	const float Applied = Construction->InvestWork(SourceInventory, WeldPoints);
+	if (Applied > 0.f)
+	{
+		OutTargetId = ExoneerConstruction::WholeActorTargetId;
+	}
+	return Applied;
 }
 
 float ABasePiece::DeconstructAt_Implementation(AActor* Builder, UInventoryComponent* RefundInventory, const FVector& WorldPoint, float WreckPoints)
@@ -266,15 +303,118 @@ float ABasePiece::DeconstructAt_Implementation(AActor* Builder, UInventoryCompon
 
 // --- IDamageable -------------------------------------------------------------
 
-float ABasePiece::RepairHealth(float Amount)
+bool ABasePiece::WipeDust()
 {
-	if (!HasAuthority() || Amount <= 0.f || !Def)
+	if (!HasAuthority() || Condition.SurfaceOpacity01 <= KINDA_SMALL_NUMBER)
 	{
-		return 0.f;
+		return false;
 	}
-	const float Old = Health;
-	Health = FMath::Min(Health + Amount, Def->MaxHealth);
-	return Health - Old;
+	Condition.SurfaceOpacity01 = 0.f;
+	return true;
+}
+
+bool ABasePiece::IsConditionTerminal() const
+{
+	// One reading, one class: a battery bank at the fade floor. Nothing else
+	// on a base piece has a spare, so nothing else can read terminal here.
+	return Def && Def->EnergyStorage > 0.f
+		&& ExoneerMaintenance::IsCapacityTerminal(Condition.CapacityFade01);
+}
+
+void ABasePiece::ResetConditionToNominal()
+{
+	Condition = FPartCondition();
+	PendingDeflectionMm = 0.f;
+	bLoadOverloaded = false;
+	LastLoadN = 0.f;
+	PendingLoadN = 0.f;
+	PendingLoadFrames = 0;
+}
+
+bool ABasePiece::ReplacePart(UInventoryComponent* Source)
+{
+	// maintenance.md 4: the failure mode picks the verb. Replace spends a
+	// FABRICATED spare, so it is legal only where the definition names one and
+	// only at a terminal reading - never as a general-purpose refresh, and
+	// never for dust (wipe already clears that in full).
+	if (!HasAuthority() || !Source || !Def || Def->SpareItemId.IsNone())
+	{
+		return false;
+	}
+	if (!Construction || !Construction->IsComplete() || !IsConditionTerminal())
+	{
+		return false;
+	}
+
+	const FPrimaryAssetId SpareAsset(TEXT("Item"), Def->SpareItemId);
+	UItemDefinitionDataAsset* Spare = Cast<UItemDefinitionDataAsset>(
+		UAssetManager::Get().GetPrimaryAssetObject(SpareAsset));
+	if (!Spare)
+	{
+		TSoftObjectPtr<UItemDefinitionDataAsset> Soft(UAssetManager::Get().GetPrimaryAssetPath(SpareAsset));
+		Spare = Soft.LoadSynchronous();
+	}
+	if (!Spare || Source->GetItemCount(Spare) < 1)
+	{
+		return false;
+	}
+	if (Source->RemoveItem(Spare, 1) < 1)
+	{
+		return false;
+	}
+
+	// Placement, structure, parent and health are untouched: a cell swap is
+	// not a rebuild and the weld tool still never heals (GAME-SCOPE 10).
+	ResetConditionToNominal();
+	return true;
+}
+
+/**
+ * SERVER. Wheel load attribution. The wheel module calls this once per FRAME
+ * per wheel standing on this piece (never once per physics substep, which
+ * would multiply the load by the substep count). Several wheels inside one
+ * frame add up, which is what a deck under an axle actually carries.
+ */
+void ABasePiece::ReportLiveLoad(float LoadN, uint64 FrameStamp)
+{
+	// Complete only: a ghost or half-welded piece carries nothing, so it can
+	// neither sag nor collapse from load. The ghost is also transparent to the
+	// wheel probe now, but the phase gate is the rule and the collision
+	// response is only the optimisation.
+	if (!HasAuthority() || LoadN <= 0.f || !Construction || !Construction->IsComplete())
+	{
+		return;
+	}
+
+	PendingLoadN += LoadN;
+	if (LastLoadReportFrame != FrameStamp)
+	{
+		LastLoadReportFrame = FrameStamp;
+		++PendingLoadFrames;
+	}
+
+	// Re-armed on every report: a structure merge under a parked rover moves
+	// this piece to another structure, whose pass must then start servicing.
+	if (OwningStructure)
+	{
+		OwningStructure->ArmLoadTimer();
+	}
+}
+
+bool ABasePiece::IsLoadCondemned() const
+{
+	return Def && Def->TerminalDeflectionMm > 0.f && Condition.DeflectionMm >= Def->TerminalDeflectionMm;
+}
+
+void ABasePiece::ApplyWeatherWear(float StormIntensity, float DtSeconds)
+{
+	if (!HasAuthority() || !IsFunctional())
+	{
+		return;
+	}
+	Condition.SurfaceOpacity01 = FMath::Clamp(
+		Condition.SurfaceOpacity01 + ExoneerMaintenance::DustOpacityDelta(StormIntensity, DtSeconds),
+		0.f, 1.f);
 }
 
 float ABasePiece::ApplyExoneerDamage_Implementation(float Amount, EExoneerDamageType Type, AActor* DamageInstigator)

@@ -32,6 +32,7 @@ struct FSavedBasePiece
 
 	/** Construction ledger, so deconstruction refunds survive a load. */
 	UPROPERTY() TArray<FInventoryEntry> InvestedMaterials;
+	UPROPERTY() FPartCondition Condition;
 };
 
 /** One base: its pieces in world space. */
@@ -68,6 +69,7 @@ struct FSavedVehicleBlock
 	// with these at defaults (0 = "use the authored nominal") - default-safe.
 	UPROPERTY() float TirePressureKPa = 0.f;
 	UPROPERTY() float SteerTrimDeg = 0.f;
+	UPROPERTY() FPartCondition Condition;
 };
 
 /** One vehicle construct: its root transform and block records. */
@@ -93,8 +95,9 @@ public:
 
 	UPROPERTY() float PlayerHealth = 100.f;
 	UPROPERTY() float PlayerOxygen = 100.f;
-	UPROPERTY() float PlayerSuitPower = 100.f;
+	UPROPERTY() float PlayerSuitPower = 1800.f;
 	UPROPERTY() float PlayerBodyTempC = 36.6f;
+	UPROPERTY() FPartCondition PlayerSuitCondition;
 
 	// --- Environment ---
 	UPROPERTY() float TimeOfDay = 0.25f;
@@ -102,4 +105,8 @@ public:
 	// --- World construction state ---
 	UPROPERTY() TArray<FSavedStructure> Structures;
 	UPROPERTY() TArray<FSavedVehicle> Vehicles;
+
+	UPROPERTY() TArray<FProjectRuntime> Projects;
+	UPROPERTY() FOrbitalKnowledge Orbital;
+	UPROPERTY() int32 SolIndex = 0;
 };

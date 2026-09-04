@@ -26,3 +26,9 @@ Build/
 # OS junk
 .DS_Store
 Thumbs.db
+
+# Agent / ruflo local runtime (do not commit)
+.claude-flow/
+.swarm/
+ruvector.db
+.claude/

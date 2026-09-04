@@ -6,9 +6,28 @@
 
 /**
  * How a construct interprets pilot input.
- * Flight: move = thrust intents, look = gyro torque (the v1 thruster scheme).
- * Ground: W/S = drive throttle, A/D = steer, look = free camera; the gyro is
- * gated to GroundModeGyroFraction so a rover cannot attitude-thrust mid-air.
+ *
+ * Flight: W/S = forward and back thrust, A/D = roll rate, mouse = pitch and
+ * yaw RATE, lift key = climb while HELD, descend key = close the valve while
+ * HELD, and neither held airborne = the lift governor holds altitude.
+ *
+ * Every attitude demand returns to zero when the key is released and the triad
+ * nulls whatever body rate is left, so letting go stops the craft rotating.
+ * Lift returns to a HOVER rather than to zero, which is the one thing a craft
+ * with a 1.2 thrust-to-weight ratio needs and a bare valve cannot give: the
+ * alternatives were climbing at 0.3 g or falling at 1 g with nothing between
+ * them. The governor is not a latch - the descend key shuts it, so does
+ * touching down, an input timeout, leaving the seat, or switching to Ground -
+ * and it carries no integrator, so its whole state is a vertical speed the
+ * pilot can read. There is still no attitude hold and no latched collective.
+ *
+ * Ground: W/S = drive throttle, A/D = steer, look = free camera, and the lift
+ * valve is shut. The triad still rate-nulls with a pilot aboard, in both modes
+ * and loaded wheels or not: a reaction wheel really does resist rotation while
+ * the hull sits on its tyres, it is the pilot's instinctive "make it stop",
+ * and the wheel-contact bleed keeps whatever it stores from being permanent.
+ * So the mode toggle is never a tumble switch at altitude, and it never takes
+ * damping away on the ground either.
  */
 UENUM(BlueprintType)
 enum class EPilotControlMode : uint8
@@ -21,7 +40,15 @@ namespace EPilotHeldFlags
 {
 	enum Type : uint8
 	{
+		/** GROUND only: hold the parking brake. Suppressed in Flight. */
 		Handbrake = 1 << 0,
+		/**
+		 * FLIGHT only: close the lift valve. It rides as a HELD FLAG, not an
+		 * axis, for two reasons - a hold can never be lost to packet timing,
+		 * and ZeroAxes deliberately does not clear it, so an input timeout
+		 * leaves the craft descending rather than hovering on a dead link.
+		 */
+		Descend = 1 << 1,
 	};
 }
 
@@ -39,11 +66,20 @@ struct FPilotInput
 {
 	GENERATED_BODY()
 
-	/** Flight-mode thrust intent in the cockpit frame (X fwd, Y right, Z up), each axis [-1, 1]. */
+	/**
+	 * Flight-mode thrust intent in the cockpit frame. X/Y are a horizontal
+	 * direction and magnitude; Z is the CLIMB level: 1 while the lift key is
+	 * held, 0 the moment it is released.
+	 *
+	 * Zero does not mean hold. The server decides the valve target from three
+	 * inputs - this level, the Descend held flag, and whether the craft is
+	 * airborne under a live pilot - and ZeroAxes plus the staleness check below
+	 * is what makes a timeout close the valve rather than hover on a dead link.
+	 */
 	UPROPERTY(BlueprintReadWrite, Category = "Pilot")
 	FVector Move = FVector::ZeroVector;
 
-	/** Flight-mode gyro intent (pitch, yaw, roll), each axis [-1, 1]. */
+	/** Flight-mode attitude RATE command (pitch, yaw, roll), each axis [-1, 1] of the craft's rate limit. */
 	UPROPERTY(BlueprintReadWrite, Category = "Pilot")
 	FVector Rotate = FVector::ZeroVector;
 
@@ -84,7 +120,14 @@ struct FPilotInput
 		ModeToggleCount &= 0x3;
 	}
 
-	/** Zero the axes but keep held flags and the toggle counter (timeout behavior). */
+	/**
+	 * Zero the axes but keep held flags and the toggle counter (timeout
+	 * behavior). Move.Z is a LEVEL, so this drops the climb demand; the server
+	 * additionally treats a stale packet as no pilot for the lift governor, so
+	 * the valve closes instead of holding altitude on a dead link. Descend is a
+	 * held flag and survives on purpose - failing toward the ground is the
+	 * honest response to input that has stopped arriving.
+	 */
 	void ZeroAxes()
 	{
 		Move = FVector::ZeroVector;

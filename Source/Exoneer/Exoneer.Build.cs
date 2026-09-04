@@ -30,7 +30,8 @@ public class Exoneer : ModuleRules
 			"GameplayTags",
 			"NetCore",
 			"AIModule",
-			"NavigationSystem"
+			"NavigationSystem",
+			"CableComponent"
 		});
 
 		PrivateDependencyModuleNames.AddRange(new string[]

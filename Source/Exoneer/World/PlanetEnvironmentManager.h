@@ -10,6 +10,7 @@ class UExoneerSoilPhysicalMaterial;
 class ADirectionalLight;
 class ABasePiece;
 class ABaseStructure;
+class APawn;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnTimeOfDayChanged, float, NormalizedTimeOfDay);
 
@@ -58,6 +59,16 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Planet") bool IsNight() const;
 	UFUNCTION(BlueprintPure, Category = "Planet") bool IsStormActive() const { return bStormActive; }
 	UFUNCTION(BlueprintPure, Category = "Planet") float GetStormIntensity() const { return StormIntensity; }
+
+	/**
+	 * SERVER. Test fixture: start a storm of Intensity (0-1) that lasts
+	 * DurationSeconds, so dust, seal exposure and dish drift can all be
+	 * exercised inside one session instead of waiting for the schedule roll.
+	 * Intensity 0 or DurationSeconds 0 ends the active storm instead.
+	 * Console: exoneer.ForceStorm <intensity 0-1> <seconds>
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Planet")
+	void ForceStorm(float Intensity, float DurationSeconds);
 
 	/** BP hook for wind, audio, and post FX; fires on every machine when storm state changes. */
 	UFUNCTION(BlueprintImplementableEvent, Category = "Planet")
@@ -110,4 +121,10 @@ protected:
 
 	/** SERVER. Exposure = no blocking hit on an upward trace from the piece bounds top + 10 cm. */
 	bool IsPieceExposed(ABasePiece* Piece);
+
+	/**
+	 * SERVER. Same upward ECC_Visibility cover test as a piece, uncached.
+	 * One trace per pawn per storm tick.
+	 */
+	bool IsPawnExposed(APawn* Pawn) const;
 };

@@ -6,6 +6,7 @@ namespace ExoneerTags
 	UE_DEFINE_GAMEPLAY_TAG_COMMENT(Interaction_Use,           "Exoneer.Interaction.Use",           "Generic use/activate verb");
 	UE_DEFINE_GAMEPLAY_TAG_COMMENT(Interaction_OpenContainer, "Exoneer.Interaction.OpenContainer", "Opens an inventory/container UI");
 	UE_DEFINE_GAMEPLAY_TAG_COMMENT(Interaction_Pilot,         "Exoneer.Interaction.Pilot",         "Enter/exit a vehicle pilot seat");
+	UE_DEFINE_GAMEPLAY_TAG_COMMENT(Interaction_Connect,       "Exoneer.Interaction.Connect",       "Connect or disconnect an umbilical");
 
 	UE_DEFINE_GAMEPLAY_TAG_COMMENT(Mount_Foundation, "Exoneer.Mount.Foundation", "Snaps to terrain or foundation edge sockets");
 	UE_DEFINE_GAMEPLAY_TAG_COMMENT(Mount_Wall,       "Exoneer.Mount.Wall",       "Snaps to wall sockets (foundation/floor edges, wall tops)");

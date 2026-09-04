@@ -6,7 +6,9 @@
 #include "Components/PowerComponent.h"
 #include "Components/PowerNetworkComponent.h"
 #include "Data/PieceDefinitionDataAsset.h"
+#include "ExoneerGameplayTags.h"
 #include "Machines/MachinePiece.h"
+#include "Maintenance/ExoneerMaintenance.h"
 #include "Components/SceneComponent.h"
 #include "Engine/OverlapResult.h"
 #include "Engine/StaticMesh.h"
@@ -22,6 +24,45 @@ namespace
 
 	/** Actor tag marking pieces already scheduled for collapse (no double-batching). */
 	const FName NAME_ExoneerCollapsing(TEXT("Exoneer.Collapsing"));
+
+	/** Live-load pass rate. Fast enough for a deck to fail under a rolling rover, slow enough to be free. */
+	constexpr float LoadServiceIntervalSeconds = 0.2f;
+
+	/** The pass disarms itself after this long with no wheel reports. */
+	constexpr float LoadIdleTimeoutSeconds = 1.f;
+
+	/** The published live-load reading moves this many newtons before it replicates. */
+	constexpr float LoadReadingDeadbandN = 50.f;
+
+	/** Permanent set earned before the replicated reading moves. */
+	constexpr float DeflectionDeadbandMm = 0.5f;
+
+	/**
+	 * One predicate for "this piece founds its own support", shared by the
+	 * solver's seeds and its collapse exemption, and the same one the build
+	 * tool uses to decide what may be placed on terrain
+	 * (BuildToolComponent's IsTerrainPlaceable): groundable OR deployable,
+	 * holding no socket parent.
+	 *
+	 * Deployables were missing here. A dish or solar panel welded straight
+	 * onto terrain founded a structure, never got a seed, read as an orphan
+	 * and was collapsed 0.5 s later - the grounded-deployable bug.
+	 */
+	bool IsSelfGrounded(const ABasePiece* P)
+	{
+		return P && P->Def && !IsValid(P->ParentPiece)
+			&& (P->Def->bGroundable || P->Def->MountTag == ExoneerTags::Mount_Deployable);
+	}
+
+	/**
+	 * Founds its own support AND is not currently crushed by live wheel load.
+	 * A grossly overloaded deck loses the exemption as well as the seed, or a
+	 * grounded deck could never fall however much rover stood on it.
+	 */
+	bool IsSelfSupporting(const ABasePiece* P)
+	{
+		return IsSelfGrounded(P) && !P->bLoadOverloaded;
+	}
 
 	const FPieceSocketDef* FindSocketDef(const UPieceDefinitionDataAsset* Def, FName Socket)
 	{
@@ -98,23 +139,9 @@ bool ABaseStructure::CanPlacePiece(UPieceDefinitionDataAsset* Def, ABasePiece* P
 		return false;
 	}
 
-	// Support: the new piece hangs off the parent's chain. Groundable pieces
-	// skip the precheck (they may snap on and later count as grounded or draw
-	// from neighbors); everything else must end with support left over.
-	// Ghost parents hold SupportValue 0, so welding the parent comes first.
-	// The formula MUST mirror the solver in RecomputeSupport exactly - a
-	// neighbor passes on at most min(its value, its own budget) - our cost -
-	// or an approved piece collapses the moment it is welded to Complete.
-	if (!Def->bGroundable)
-	{
-		const int32 ParentBudget = Parent->Def ? Parent->Def->SupportBudget : 0;
-		const int32 Prospective = FMath::Min(Parent->SupportValue, ParentBudget) - Def->SupportCost;
-		if (Prospective <= 0)
-		{
-			OutError = EBuildPlacementError::NoSupport;
-			return false;
-		}
-	}
+	// Ghosts are free planning markers: they take no support. Collapse is
+	// enforced when a piece becomes Complete (RecomputeSupport), so a
+	// refinery can be ghosted onto a foundation that is still being welded.
 	return true;
 }
 
@@ -159,7 +186,7 @@ ABasePiece* ABaseStructure::PlaceGroundedGhost(UWorld* World, UPieceDefinitionDa
 		OutError = EBuildPlacementError::Unknown;
 		return nullptr;
 	}
-	if (!Def || !Def->bGroundable)
+	if (!Def || (!Def->bGroundable && Def->MountTag != ExoneerTags::Mount_Deployable))
 	{
 		OutError = EBuildPlacementError::InvalidDefinition;
 		return nullptr;
@@ -420,6 +447,136 @@ void ABaseStructure::AbsorbStructure(ABaseStructure* Other)
 	RecomputeSupport();
 }
 
+// --- Live load (V-SPAN) ---------------------------------------------------------
+
+void ABaseStructure::ArmLoadTimer()
+{
+	if (!HasAuthority())
+	{
+		return;
+	}
+	// Idempotent: every wheel report calls this, so it restarts the idle
+	// countdown and only creates the timer when the pass is not running.
+	LoadReportIdleSeconds = 0.f;
+	if (!GetWorldTimerManager().IsTimerActive(LoadTimerHandle))
+	{
+		GetWorldTimerManager().SetTimer(LoadTimerHandle, this, &ABaseStructure::ServiceLoadReports,
+			LoadServiceIntervalSeconds, /*bLoop*/ true);
+	}
+}
+
+/**
+ * SERVER. One live-load pass, 5 Hz. Judging load here rather than inside the
+ * per-frame wheel report keeps the O(pieces) support solver event driven: the
+ * pass only runs while something is standing on this base, and only calls
+ * RecomputeSupport when a piece actually fails.
+ *
+ * Only pieces that REPORTED load this window are judged, so a machine face is
+ * never measured against a deck rule.
+ */
+void ABaseStructure::ServiceLoadReports()
+{
+	if (!HasAuthority())
+	{
+		return;
+	}
+
+	const float Dt = LoadServiceIntervalSeconds;
+
+	// One gravity source: APlanetEnvironmentManager writes the biome's
+	// GravityZ (uu/s^2) into world settings on both sides, so this is the
+	// planet's g in SI and no 9.81 literal appears anywhere.
+	const UWorld* World = GetWorld();
+	const float GravityMps2 = World ? FMath::Abs(World->GetGravityZ()) / 100.f : 0.f;
+
+	bool bAnyReports = false;
+	bool bAnyOverload = false;
+
+	for (const TObjectPtr<ABasePiece>& Ptr : Pieces)
+	{
+		ABasePiece* P = Ptr.Get();
+		if (!IsValid(P) || P->PendingLoadFrames <= 0)
+		{
+			continue;
+		}
+		bAnyReports = true;
+
+		// Mean of the per-frame sums: every wheel standing on the piece adds
+		// its own normal load within a frame, and the frames average out the
+		// suspension bouncing over a seam.
+		const float LoadN = P->PendingLoadN / static_cast<float>(P->PendingLoadFrames);
+		P->PendingLoadN = 0.f;
+		P->PendingLoadFrames = 0;
+
+		if (FMath::Abs(P->LastLoadN - LoadN) >= LoadReadingDeadbandN)
+		{
+			P->LastLoadN = LoadN;
+		}
+
+		// A condemned deck and an unrated piece are the same case: effective
+		// capacity 0, which LoadRatio reads as a gross overload before it
+		// divides by anything.
+		const float CapacityKg = (P->Def && !P->IsLoadCondemned()) ? P->Def->LoadCapacityKg : 0.f;
+		const float Ratio = ExoneerMaintenance::LoadRatio(LoadN, CapacityKg, GravityMps2);
+
+		if (Ratio >= ExoneerMaintenance::GrossOverloadRatio)
+		{
+			// Immediate event. The solver gives an overloaded piece no support
+			// and no grounded exemption, and the existing 0.5 s collapse batch
+			// (with its tag guard, FX multicast and NotifyPieceRemoved
+			// bookkeeping) does the rest - no third piece-death path.
+			if (!P->bLoadOverloaded)
+			{
+				P->bLoadOverloaded = true;
+				bAnyOverload = true;
+			}
+			continue;
+		}
+
+		// Between the rating and twice it: permanent set, one way. 1.5x rating
+		// reaches the 60 mm terminal reading in 20 s.
+		const float DeltaMm = ExoneerMaintenance::DeflectionDeltaMm(Ratio, Dt);
+		if (DeltaMm > 0.f)
+		{
+			P->PendingDeflectionMm += DeltaMm;
+			if (P->PendingDeflectionMm >= DeflectionDeadbandMm)
+			{
+				P->Condition.DeflectionMm += P->PendingDeflectionMm;
+				P->PendingDeflectionMm = 0.f;
+			}
+		}
+	}
+
+	if (bAnyReports)
+	{
+		LoadReportIdleSeconds = 0.f;
+	}
+	else
+	{
+		LoadReportIdleSeconds += Dt;
+		if (LoadReportIdleSeconds >= LoadIdleTimeoutSeconds)
+		{
+			// Nothing is standing on this base any more: stop the pass and
+			// clear the published readings, so the wrist shows 0 kg instead of
+			// whatever the rover weighed before it drove off.
+			GetWorldTimerManager().ClearTimer(LoadTimerHandle);
+			LoadReportIdleSeconds = 0.f;
+			for (const TObjectPtr<ABasePiece>& Ptr : Pieces)
+			{
+				if (ABasePiece* P = Ptr.Get())
+				{
+					P->LastLoadN = 0.f;
+				}
+			}
+		}
+	}
+
+	if (bAnyOverload)
+	{
+		RecomputeSupport();
+	}
+}
+
 // --- Support solver -------------------------------------------------------------
 
 void ABaseStructure::RecomputeSupport()
@@ -468,7 +625,7 @@ void ABaseStructure::RecomputeSupport()
 	Queue.Reserve(Pieces.Num());
 	for (const TObjectPtr<ABasePiece>& P : Pieces)
 	{
-		if (P->Def && P->Def->bGroundable && !P->ParentPiece && P->Construction && P->Construction->IsComplete())
+		if (IsSelfSupporting(P.Get()) && P->Construction && P->Construction->IsComplete())
 		{
 			P->SupportValue = P->Def->SupportBudget;
 			Queue.Add(P);
@@ -498,6 +655,13 @@ void ABaseStructure::RecomputeSupport()
 			{
 				continue;
 			}
+			// A grossly overloaded piece is SupportValue 0 by definition: it
+			// takes no support from a neighbour, so it cannot be rescued by
+			// the other end of a deck chain, and it passes none on either.
+			if (P->bLoadOverloaded)
+			{
+				continue;
+			}
 			const int32 Candidate = FMath::Min(Node->SupportValue, Node->Def->SupportBudget) - P->Def->SupportCost;
 			if (Candidate > P->SupportValue)
 			{
@@ -519,12 +683,12 @@ void ABaseStructure::RecomputeSupport()
 		{
 			continue;
 		}
-		const bool bOrphaned = !P->Def->bGroundable && !IsValid(P->ParentPiece);
+		const bool bOrphaned = !IsSelfGrounded(P.Get()) && !IsValid(P->ParentPiece);
 		if (P->Construction->GetPhase() == EConstructionPhase::Ghost && !bOrphaned)
 		{
 			continue;
 		}
-		if (P->Def->bGroundable && !P->ParentPiece)
+		if (IsSelfSupporting(P.Get()))
 		{
 			continue;
 		}

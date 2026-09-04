@@ -1,0 +1,57 @@
+{
+  "objective": "Close ROADMAP open gaps 2–6: V-SPAN, V-HAND, motor-temp consume, umbilical, remaining condition classes",
+  "created": "2026-09-03",
+  "targetDate": "2026-09-30",
+  "currentMilestone": "m5",
+  "progressPercent": 70,
+  "drift": "none — blocked only by uncommitted tree (gap 1, out of this horizon)",
+  "adrs": ["ADR-001", "ADR-002", "ADR-003"],
+  "milestones": [
+    {
+      "id": "m2",
+      "name": "V-SPAN: deck carries rover mass",
+      "gap": 2,
+      "criteria": "Deck piece reads vehicle contact load into the support solver. Loaded rover on SupportValue ≤ 0 collapses the span.",
+      "status": "done",
+      "files": ["Source/Exoneer/Building/BaseStructure.cpp", "Source/Exoneer/Building/BasePiece.*"]
+    },
+    {
+      "id": "m3",
+      "name": "V-HAND: Handshake can fail",
+      "gap": 3,
+      "criteria": "Add DishOnAzimuth and window criterion types. Set DurationSols > 0. Fail line is an engineering sentence. Next window retries.",
+      "status": "pending",
+      "files": ["Source/Exoneer/World/ProjectSubsystem.cpp", "Source/Exoneer/ExoneerTypes.h", "scripts/BootstrapPrototype.py"]
+    },
+    {
+      "id": "m4",
+      "name": "Consume motor winding temperature",
+      "gap": 4,
+      "criteria": "WindingTempC derates torque, trips, and shows a dash/visor line. Written-not-read is gone.",
+      "status": "done",
+      "files": ["Source/Exoneer/Vehicles/WheelModule.cpp", "Source/Exoneer/Maintenance/ExoneerMaintenance.h", "Source/Exoneer/Player/ExoneerHUD.cpp"]
+    },
+    {
+      "id": "m5",
+      "name": "Umbilical replaces proximity sip",
+      "gap": 5,
+      "criteria": "Suit O2/power recharge is an umbilical actor, not a radius cheat. Sandbox completeness test step 8.",
+      "status": "done",
+      "files": ["Source/Exoneer/Machines/UmbilicalPortPiece.*", "Source/Exoneer/Player/PlayerSurvivalCharacter.*", "Source/Exoneer/Components/SurvivalStatsComponent.*"]
+    },
+    {
+      "id": "m6",
+      "name": "Battery fade, seal leak, structure fatigue",
+      "gap": 6,
+      "criteria": "Three condition classes at reduced order per design/maintenance.md. Spend from named integrals. Legal verbs only (ADR-002).",
+      "status": "done",
+      "files": ["Source/Exoneer/Maintenance/ExoneerMaintenance.h", "Source/Exoneer/Building/BasePiece.*", "Source/Exoneer/Components/SurvivalStatsComponent.*"]
+    }
+  ],
+  "sessions": [
+    {
+      "date": "2026-09-03",
+      "note": "Plugins installed. ADRs 001–003 accepted. Horizon opened. Memory MCP write blocked on Windows WAL (claude-flow daemon). Source of truth is this file + docs/ROADMAP.md."
+    }
+  ]
+}

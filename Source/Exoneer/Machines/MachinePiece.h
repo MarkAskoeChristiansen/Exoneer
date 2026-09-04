@@ -51,6 +51,24 @@ public:
 	/** SERVER. Recompute and replicate MachineState (called by subclasses/tick). */
 	void UpdateMachineState(EMachineState NewState);
 
+	/** Joules this pack can still hold: rated storage less capacity fade. */
+	UFUNCTION(BlueprintPure, Category = "Machine")
+	float GetEffectiveEnergyStorageJ() const;
+
+	/**
+	 * SERVER. Age the pack by ThroughputJ joules moved in or out at AmbientC,
+	 * called by the structure's power network once per sim step. The published
+	 * reading moves in ExoneerMaintenance::CapacityFadeDeadband steps; when it
+	 * does, the derated storage capacity is re-applied and the stored energy
+	 * clamped into it.
+	 */
+	void ApplyEnergyThroughput(float ThroughputJ, float AmbientC);
+
+	/** Applies Def-driven stats (power draw/output derated by fade, inventory capacity). */
+	virtual void ApplyDefinitionStats();
+
+	virtual void ResetConditionToNominal() override;
+
 	// IInteractable: server side is a no-op for plain machines; UI opens locally.
 	virtual bool OnInteract_Implementation(AActor* Interactor) override;
 	virtual void OnInteractLocal_Implementation(AActor* Interactor) override;
@@ -63,6 +81,6 @@ protected:
 
 	UFUNCTION() void OnRep_MachineState();
 
-	/** Applies Def-driven stats (power draw/output, inventory capacity). */
-	virtual void ApplyDefinitionStats();
+	/** SERVER, transient. Fade banked against the FadeDeadband. */
+	float PendingCapacityFade = 0.f;
 };

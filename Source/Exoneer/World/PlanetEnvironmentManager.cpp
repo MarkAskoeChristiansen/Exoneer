@@ -1,9 +1,12 @@
 // Copyright Exoneer contributors.
 #include "World/PlanetEnvironmentManager.h"
+#include "Exoneer.h"
+#include "HAL/IConsoleManager.h"
 #include "Data/PlanetBiomeDataAsset.h"
 #include "Data/PieceDefinitionDataAsset.h"
 #include "Building/BaseStructure.h"
 #include "Building/BasePiece.h"
+#include "Vehicles/VehicleConstruct.h"
 #include "Components/ConstructionComponent.h"
 #include "Interfaces/Damageable.h"
 #include "Engine/DirectionalLight.h"
@@ -13,6 +16,9 @@
 #include "GameFramework/WorldSettings.h"
 #include "Net/UnrealNetwork.h"
 #include "Physics/ExoneerSoilPhysicalMaterial.h"
+#include "Components/SurvivalStatsComponent.h"
+#include "Maintenance/ExoneerMaintenance.h"
+#include "GameFramework/Pawn.h"
 
 APlanetEnvironmentManager::APlanetEnvironmentManager()
 {
@@ -84,7 +90,7 @@ float APlanetEnvironmentManager::GetCurrentAmbientTemperatureC() const
 void APlanetEnvironmentManager::UpdateSun()
 {
 	if (!SunLight) return;
-	UDirectionalLightComponent* L = SunLight->GetComponent();
+	UDirectionalLightComponent* L = Cast<UDirectionalLightComponent>(SunLight->GetLightComponent());
 	if (!L) return;
 
 	// The day/night cycle rotates the light every tick; a Static/Stationary
@@ -181,13 +187,87 @@ void APlanetEnvironmentManager::OnRep_Storm()
 	OnStormChangedBP(bStormActive, StormIntensity);
 }
 
+void APlanetEnvironmentManager::ForceStorm(float Intensity, float DurationSeconds)
+{
+	if (!HasAuthority())
+	{
+		return;
+	}
+
+	// Cover geometry is cached per storm, so both branches start from nothing.
+	ExposureCache.Empty();
+	CachedStructurePieceCounts.Empty();
+	StormDamageTimer = 0.f;
+
+	const float Clamped = FMath::Clamp(Intensity, 0.f, 1.f);
+	if (Clamped <= 0.f || DurationSeconds <= 0.f)
+	{
+		bStormActive = false;
+		StormIntensity = 0.f;
+		StormSecondsRemaining = 0.f;
+		OnRep_Storm(); // The listen host takes the client notification path too.
+		UE_LOG(LogExoneer, Log, TEXT("ForceStorm cleared the storm on %s"), *GetName());
+		return;
+	}
+
+	bStormActive = true;
+	StormIntensity = Clamped;
+	StormSecondsRemaining = DurationSeconds;
+	// Reset the schedule roll so the natural cadence does not fire the instant
+	// this forced storm ends.
+	StormTimer = 0.f;
+	OnRep_Storm();
+	UE_LOG(LogExoneer, Log, TEXT("ForceStorm: intensity %.2f for %.0f s on %s"),
+		Clamped, DurationSeconds, *GetName());
+}
+
+/**
+ * exoneer.ForceStorm <intensity 0-1> <seconds>
+ *
+ * Server only: a client typing it changes nothing (storm state is replicated
+ * from the server). Defaults to a full storm for two minutes when the
+ * arguments are missing.
+ */
+static void ExoneerForceStormCommand(const TArray<FString>& Args, UWorld* World)
+{
+	if (!World)
+	{
+		return;
+	}
+	if (World->GetNetMode() == NM_Client)
+	{
+		UE_LOG(LogExoneer, Warning, TEXT("exoneer.ForceStorm is server only; storm state replicates from the server."));
+		return;
+	}
+
+	const float Intensity = Args.Num() > 0 ? FCString::Atof(*Args[0]) : 1.f;
+	const float Seconds = Args.Num() > 1 ? FCString::Atof(*Args[1]) : 120.f;
+
+	int32 Managers = 0;
+	for (TActorIterator<APlanetEnvironmentManager> It(World); It; ++It)
+	{
+		It->ForceStorm(Intensity, Seconds);
+		++Managers;
+	}
+	if (Managers == 0)
+	{
+		UE_LOG(LogExoneer, Warning, TEXT("exoneer.ForceStorm found no APlanetEnvironmentManager in %s."), *World->GetName());
+	}
+}
+
+static FAutoConsoleCommandWithWorldAndArgs GExoneerForceStormCmd(
+	TEXT("exoneer.ForceStorm"),
+	TEXT("exoneer.ForceStorm <intensity 0-1> <seconds>: run a storm now (server only) so dust, seal exposure and dish drift can be exercised in one session. Intensity 0 or seconds 0 ends the active storm."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&ExoneerForceStormCommand));
+
 void APlanetEnvironmentManager::ApplyStormDamage()
 {
 	UWorld* World = GetWorld();
-	if (!World || !Biome) return;
+	if (!World) return;
 
-	const float BaseDamage = Biome->StormDamagePerSecond * FMath::Clamp(StormIntensity, 0.f, 1.f);
-	if (BaseDamage <= 0.f) return;
+	const float BaseDamage = (Biome ? Biome->StormDamagePerSecond : 0.f) * FMath::Clamp(StormIntensity, 0.f, 1.f);
+	if (BaseDamage > 0.f)
+	{
 
 	for (TActorIterator<ABaseStructure> It(World); It; ++It)
 	{
@@ -223,8 +303,45 @@ void APlanetEnvironmentManager::ApplyStormDamage()
 			{
 				IDamageable::Execute_ApplyExoneerDamage(Piece, Damage, EExoneerDamageType::Impact, this);
 			}
+			Piece->ApplyWeatherWear(StormIntensity, 1.f);
 		}
 	}
+
+	for (TActorIterator<AVehicleConstruct> Veh(World); Veh; ++Veh)
+	{
+		Veh->ApplyWeatherWear(StormIntensity, 1.f);
+	}
+	}
+
+	for (TActorIterator<APawn> PawnIt(World); PawnIt; ++PawnIt)
+	{
+		APawn* Pawn = *PawnIt;
+		if (!IsValid(Pawn) || !IsPawnExposed(Pawn))
+		{
+			continue;
+		}
+		if (USurvivalStatsComponent* Stats = Pawn->FindComponentByClass<USurvivalStatsComponent>())
+		{
+			Stats->AddLeakRateLps(ExoneerMaintenance::SealLeakGrowthLps(StormIntensity, Stats->SuitCondition.PatchCount));
+		}
+	}
+}
+
+bool APlanetEnvironmentManager::IsPawnExposed(APawn* Pawn) const
+{
+	if (!Pawn || !GetWorld())
+	{
+		return false;
+	}
+	const FBox Bounds = Pawn->GetComponentsBoundingBox();
+	const FVector Center = Bounds.GetCenter();
+	const FVector Start(Center.X, Center.Y, Bounds.Max.Z + 10.f);
+	const FVector End = Start + FVector(0.f, 0.f, 50000.f);
+
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(PawnStormExposure), /*bTraceComplex*/ false, Pawn);
+	FHitResult Hit;
+	const bool bCovered = GetWorld()->LineTraceSingleByChannel(Hit, Start, End, ECC_Visibility, Params);
+	return !bCovered;
 }
 
 bool APlanetEnvironmentManager::IsPieceExposed(ABasePiece* Piece)

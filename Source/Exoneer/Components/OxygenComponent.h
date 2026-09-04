@@ -20,7 +20,7 @@ public:
 	UOxygenComponent();
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Oxygen") float Capacity = 100.f;
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Oxygen") float Stored = 0.f;
+	UPROPERTY(Replicated, VisibleAnywhere, BlueprintReadOnly, Category = "Oxygen") float Stored = 0.f;
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Oxygen") float ProductionPerSec = 0.f;
 
 	UPROPERTY(BlueprintAssignable) FOnOxygenStorageChanged OnOxygenChanged;
@@ -29,4 +29,6 @@ public:
 	UFUNCTION(BlueprintCallable) float Withdraw(float Amount);
 
 	UFUNCTION(BlueprintPure) float GetFillFraction() const { return Capacity > 0 ? Stored / Capacity : 0.f; }
+
+	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 };

@@ -40,5 +40,6 @@ void ASolarPanelPiece::Tick(float DeltaSeconds)
 	}
 
 	const float Sun = Environment.IsValid() ? FMath::Clamp(Environment->GetSunFraction(), 0.f, 1.f) : 1.f;
-	Power->NominalOutput = FMath::Max(0.f, Def->PowerDelta) * Sun;
+	const float Dust = FMath::Clamp(Condition.SurfaceOpacity01, 0.f, 1.f);
+	Power->NominalOutput = FMath::Max(0.f, Def->PowerDelta) * Sun * (1.f - Dust);
 }

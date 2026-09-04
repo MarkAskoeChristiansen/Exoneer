@@ -1,11 +1,19 @@
 # Exoneer construction layer v2 – architecture specification
 
-Status: implemented; serves as the foundation layer for the permanent design
-boundary in [GAME-SCOPE.md](GAME-SCOPE.md) (master scope v2.0). Where this
-document and GAME-SCOPE.md disagree, GAME-SCOPE.md wins; the gap map in its
-section 9 tracks the differences.
-Scope: full redo of Building, Components, Machines, Interfaces, Vehicles, World, Resources.
-Not in scope: EOS session/transport setup (framework 0, later).
+Status: construction layer **v2 implemented**. Sections 16–18 specify the
+**v3 seams** (condition, optional projects, persistence) that sit on this
+layer; they are not implemented yet.
+
+Serves the permanent design boundary in [GAME-SCOPE.md](GAME-SCOPE.md)
+(including §10 causal maintenance) and the product north star in
+[VISION.md](VISION.md) (sandbox first, Road to Orbit optional).
+
+Where this document and GAME-SCOPE.md disagree on *behavior*, GAME-SCOPE
+wins. Where a feature disagrees with *what the game is*, VISION wins. The
+gap map is GAME-SCOPE section 9.
+
+Scope of v2: Building, Components, Machines, Interfaces, Vehicles, World,
+Resources, Save. Not in v2: EOS, condition, projects.
 
 ## 1. Design goals
 
@@ -393,8 +401,10 @@ TSoftObjectPtr<UStaticMesh> Mesh;  TSoftObjectPtr<UTexture2D> Icon;
 
 ## 13. Player integration
 
-- Tool modes: Mine / Build / Weld (Q cycles; Weld replaces v1 "Repair" – welding a
-  damaged Complete piece repairs it using a fraction of stage materials).
+- Tool modes: Mine / Build / Weld (Q cycles). Weld is **construction**
+  (ghost → complete). v2 still contains a weld-to-`RepairHealth` path on
+  Complete parts; GAME-SCOPE §10 flags it as illegal. v3 deletes that path
+  when wheels become swappable (ROADMAP P3).
 - `Client_InteractSucceeded` flow lives in UInteractionComponent (section 6).
 - Character survival internals untouched this pass; survival stat drains triggered by
   tools apply only on authority.
@@ -415,7 +425,135 @@ TSoftObjectPtr<UStaticMesh> Mesh;  TSoftObjectPtr<UTexture2D> Icon;
 
 ## 15. Verification
 
-No local UE 5.7 install is present, so this pass is verified by multi-lens code review
-(UE API correctness, replication semantics, spec fidelity, cross-module consistency)
-rather than compilation. First local build after reinstalling UE 5.7 is expected to
-surface minor include/API fixes; treat compiler output as the final arbiter.
+v2 was verified by review against UE 5.8 APIs and by subsequent local
+editor builds (wheels, terramechanics tests). Treat compiler output and
+`Exoneer.Terramechanics` automation as the living arbiter. v3 verification
+is the matrix in [ROADMAP.md](ROADMAP.md).
+
+---
+
+## 16. Condition (v3, not implemented)
+
+Spec: [design/maintenance.md](design/maintenance.md). Rules: GAME-SCOPE §10.
+
+Immediate damage stays on existing `Health` / `FVehicleBlockRecord::Health`.
+Condition is a **second replicated payload**, never a 0–1 durability alias.
+
+### 16.1 Shared readings
+
+```cpp
+USTRUCT(BlueprintType)
+struct FPartCondition
+{
+    GENERATED_BODY()
+    // Tire (mm, C, kPa). 0-depth is terminal for a tire.
+    float TreadDepthMm = -1.f;       // <0 = N/A for this part class
+    float CarcassTempC = 0.f;
+    float InflationKPa = 0.f;
+    // Motor
+    float WindingTempC = 0.f;
+    // Battery / tank
+    float CapacityFade01 = 0.f;      // 0 = nominal capacity, 1 = dead
+    // Exposed faces (solar, radio)
+    float SurfaceOpacity01 = 0.f;    // dust; production *= (1 - opacity)
+    // Seals
+    float LeakRateLps = 0.f;
+    float DeflectionMm = 0.f;
+};
+```
+
+Part classes fill only their fields; UI skips N/A (`TreadDepthMm < 0`).
+
+### 16.2 Where it lives
+
+- **Vehicle blocks:** extra fields on `FVehicleBlockRecord` (or a parallel
+  fast array keyed by `BlockInstanceId` — prefer fields on the record so
+  one delta carries health + condition). Wheel telemetry already has a
+  side array; fold tread/temp into that or into the record, not a third
+  channel.
+- **Base pieces:** `FPartCondition` on `ABasePiece`, replicated. Solar
+  opacity is the 1.0 teaching case.
+- **Pawn suit:** seal leak on `USurvivalStatsComponent` (not a new actor).
+
+Spend functions are server-only, SI, called from the systems that already
+measure the cause (`UWheelModule` / sim telemetry for slip×load and
+copper loss; `APlanetEnvironmentManager` storm tick for exposure;
+`ABaseStructure::RecomputeSupport` for overload-hours).
+
+### 16.3 Repair routing (build tool)
+
+`UBuildToolComponent` weld on Complete:
+
+- If the target is a **ghost / under construction** → `InvestConstruction` (unchanged).
+- If the target is Complete and the failure is a **weldable metal crack** →
+  patch Health only when a future crack flag exists.
+- If the target is Complete **tire / motor / solar / battery** → **do not
+  weld.** Primary on a worn wheel with a spare in inventory is **Replace**
+  (consume item, reset that record's condition, refund scrap optionally).
+- Delete `RepairHealth` as a generic heal.
+
+Replace is a Server RPC on the build tool (player-owned), same validation
+pattern as weld (range, authority, inventory).
+
+### 16.4 Save
+
+Extend `FSavedVehicleBlock` and `FSavedBasePiece` with `FPartCondition`
+(or the subset of floats). Tagged UPROPERTY serialization keeps old saves
+defaulting to nominal (full tread = spec radius-derived new-tire depth).
+
+---
+
+## 17. Optional projects (v3, not implemented)
+
+Spec: [design/projects.md](design/projects.md).
+
+### 17.1 Data
+
+`UProjectDefinitionDataAsset` : `UPrimaryDataAsset` with
+`PrimaryAssetType = "Project"`. Scan `/Game/Exoneer/Data/Projects`.
+Register a sixth `+PrimaryAssetTypesToScan` line in `DefaultGame.ini`.
+
+`FProjectCriterion`: enum type + float target (SI) + optional hold
+duration in sols. Evaluator reads live systems; no quest tokens.
+
+### 17.2 Runtime
+
+`UProjectSubsystem` : `UWorldSubsystem` (or GameState component). Server
+simulates; a compact `TArray<FProjectRuntime>` replicates on GameState
+(`bReplicates`).
+
+Accept / Abandon: player-owned Server RPC on the character or a wrist
+component (constructs are not connection-owned — same rule as §3).
+
+Tick ≤ 1 Hz. Long Watch / Handshake / Road to Orbit are three data
+assets, not three C++ subclasses.
+
+### 17.3 Knowledge rewards
+
+Handshake writes `FOrbitalKnowledge` (window times, pad constraints) into
+the save and onto the wrist. It does not grant items or unlock pieces.
+
+---
+
+## 18. Persistence expansions (v3)
+
+v2 already saves player, structures, vehicles, time-of-day
+(`ExoneerSaveGame.h`). v3 adds, all server-side:
+
+| Field | Why |
+|---|---|
+| `FPartCondition` per piece and per block | Maintenance survives load |
+| Storm state (`bStormActive`, intensity, next named-storm sol) | Long Watch soak |
+| `TArray<FProjectRuntime>` | Optional projects |
+| `FOrbitalKnowledge` | Handshake payload |
+| Suit leak rate | Seal condition |
+
+Load path stays “clear built world, respawn via placement APIs, restore
+scalars.” Restore condition **after** records exist (same as
+`RestoreVehicleBlockRecord` today).
+
+Join-in-progress: no extra channel if condition rides piece/block
+replication and projects ride GameState. Verify with ROADMAP V-JIP.
+
+Umbilical, dish actor, fuel module, and road/bridge pieces are content +
+small classes on this layer; they do not replace the v2 spine.

@@ -6,6 +6,7 @@
 #include "PowerNetworkComponent.generated.h"
 
 class UPowerComponent;
+class APlanetEnvironmentManager;
 
 USTRUCT(BlueprintType)
 struct FPowerNetworkSnapshot
@@ -58,4 +59,13 @@ protected:
 	UFUNCTION() void OnRep_Snapshot();
 
 	void Simulate(float DeltaSeconds);
+
+	/**
+	 * SERVER. Ambient air the battery banks age in, from the map's
+	 * environment manager (20 C when the map has none). The manager is found
+	 * once and cached weakly, like the vehicle ledger's own lookup.
+	 */
+	float GetAmbientTemperatureC();
+
+	TWeakObjectPtr<APlanetEnvironmentManager> CachedEnvironment;
 };

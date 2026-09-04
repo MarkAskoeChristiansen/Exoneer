@@ -135,6 +135,21 @@ uint8 FindOrientationMappingAxis(const FVector& LocalAxis, const FVector& Target
 	return 0;
 }
 
+uint8 FindOrientationMappingAxes(const FVector& LocalAxisA, const FVector& TargetWorldA,
+	const FVector& LocalAxisB, const FVector& TargetWorldB, float Tolerance)
+{
+	for (uint8 Candidate = 0; Candidate < NumOrientations; ++Candidate)
+	{
+		const FQuat& Q = GetQuat(Candidate);
+		if (Q.RotateVector(LocalAxisA).Equals(TargetWorldA, Tolerance)
+			&& Q.RotateVector(LocalAxisB).Equals(TargetWorldB, Tolerance))
+		{
+			return Candidate;
+		}
+	}
+	return 0;
+}
+
 uint8 CycleYaw(uint8 Orientation, int32 Steps)
 {
 	if (Orientation >= NumOrientations)

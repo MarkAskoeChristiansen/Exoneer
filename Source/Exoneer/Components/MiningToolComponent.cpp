@@ -3,7 +3,6 @@
 #include "Components/InventoryComponent.h"
 #include "Components/SurvivalStatsComponent.h"
 #include "Resources/ResourceNode.h"
-#include "Camera/CameraComponent.h"
 #include "Components/SceneComponent.h"
 #include "Engine/World.h"
 #include "GameFramework/Pawn.h"
@@ -34,17 +33,12 @@ void UMiningToolComponent::TickComponent(float DeltaTime, ELevelTick TickType, F
 	}
 
 	AActor* Owner = GetOwner();
+	// The owner's eyes, not "the first UCameraComponent on the actor": a pawn
+	// can carry more than one camera (visor plus chase boom) and that lookup
+	// returns an arbitrary one. The server reach check uses the same point.
 	FVector Start;
 	FRotator ViewRot;
-	if (const UCameraComponent* Cam = Owner->FindComponentByClass<UCameraComponent>())
-	{
-		Start = Cam->GetComponentLocation();
-		ViewRot = Cam->GetComponentRotation();
-	}
-	else
-	{
-		Owner->GetActorEyesViewPoint(Start, ViewRot);
-	}
+	Owner->GetActorEyesViewPoint(Start, ViewRot);
 	const FVector End = Start + ViewRot.Vector() * Range;
 
 	FHitResult Hit;

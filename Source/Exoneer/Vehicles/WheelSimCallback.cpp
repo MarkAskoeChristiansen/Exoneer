@@ -30,6 +30,10 @@ void FExoneerWheelSimCallback::OnPreSimulate_Internal()
 	Body.LinearVelocityUU = FVector(Handle->V());
 	Body.AngularVelocityRad = FVector(Handle->W());
 	Body.ComWorldUU = FVector(Chaos::FParticleUtilitiesGT::GetCoMWorldPosition(Handle));
+	Body.MassKg = (float)Handle->M();
+	Body.WheelCount = Input->Wheels.Num();
+	Body.ComRotation = FQuat(Chaos::FParticleUtilitiesGT::GetCoMWorldRotation(Handle));
+	Body.InvInertiaDiag = FVector(Handle->InvI());
 
 	FExoneerWheelSimOutput& Output = GetProducerOutputData_Internal();
 	Output.Wheels.SetNum(Input->Wheels.Num());

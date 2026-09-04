@@ -91,6 +91,21 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Support")
 	bool bGroundable = false;
 
+	/**
+	 * Live wheel load this piece carries, as a MASS (kg): the weight limit is
+	 * LoadCapacityKg * g on this planet. 0 means UNRATED - the piece is not a
+	 * deck and collapses under any wheel at all (V-SPAN, GAME-SCOPE 10).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Support")
+	float LoadCapacityKg = 0.f;
+
+	/**
+	 * Permanent set (mm) at which the deck is condemned: it stays standing and
+	 * keeps passing support, but carries nothing and the legal verb is rebuild.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Support")
+	float TerminalDeflectionMm = 60.f;
+
 	/** 0..1 storm damage mitigation. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Stats", meta = (ClampMin = "0", ClampMax = "1"))
 	float StormResistance = 0.f;
@@ -112,6 +127,15 @@ public:
 	/** Oxygen units per second produced while powered (oxygen generators). */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Machine")
 	float OxygenProductionPerSec = 0.f;
+
+	/**
+	 * Primary asset name of the fabricated spare the Replace verb consumes
+	 * (battery bank: "battery_cell"). None means this piece has no spare and
+	 * can never be replaced - the verb for it is rebuild. Mirrors
+	 * UVehicleBlockDefinitionDataAsset::SpareItemId.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Machine")
+	FName SpareItemId;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Visual")
 	TSoftObjectPtr<UStaticMesh> Mesh;

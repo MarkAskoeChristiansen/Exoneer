@@ -7,9 +7,15 @@ Genre: first-person hyper-realistic engineering and logistics survival sandbox.
 This document is the boundary for all design and implementation work. Features
 outside these eight modules are out of scope. Features inside them must follow
 the realism rules stated here – in particular section 7's ban on abstract stat
-bonuses and section 8's ban on screen-space HUD bars. The current C++
-implementation layer is documented in [ARCHITECTURE-V2.md](ARCHITECTURE-V2.md);
-section 9 below maps it against this scope.
+bonuses, section 8's ban on screen-space HUD bars, and **section 10's causal
+maintenance rules** (immediate damage ≠ condition; no healing beam). The
+current C++ implementation layer is documented in
+[ARCHITECTURE-V2.md](ARCHITECTURE-V2.md); section 9 below maps it against
+this scope.
+
+Product thesis (sandbox first, optional projects, Road to Orbit as the
+unique endgoal) lives in [VISION.md](VISION.md). This file still wins on
+*how a system must behave*; VISION wins on *what the game is* and *what 1.0 ships*.
 
 ---
 
@@ -119,10 +125,12 @@ distribution – which is exactly what the Driver talents calibrate (section 7).
   printers combine refined metals into high-tolerance mechanical and
   electrical components (pistons, microprocessors, hydraulic lines).
 - **Mechanical wear and repair**: machinery and vehicle components suffer
-  structural attrition. Gears strip under high-torque abuse; tires puncture
-  on sharp rock. Repairs are never a magical healing beam: the player
-  physically unbolts the broken sub-component and bolts on a manufactured
-  replacement part.
+  structural attrition. Gears strip under high-torque abuse; tires lose
+  tread under slip×load and puncture on sharp rock. Repairs are never a
+  magical healing beam: the player diagnoses a physical reading (tread mm,
+  winding °C, leak L/s, capacity kJ) and applies the verb that matches the
+  failure — weld a crack, wipe dust, service a seal, or unbolt and replace
+  the part. See section 10.
 
 ## 6. Environmental logistics and weather
 
@@ -235,18 +243,81 @@ replicated foundation this scope builds on. Status per module:
 
 | Scope module | Current layer | Gap to close |
 |---|---|---|
-| 1. Suit & life support | Suit power/O2/temperature replicated; **Nutrition stat still exists** | Remove Nutrition (scope bans hunger); umbilical recharge; haptic mass/friction movement; fabricator tool modes |
+| 1. Suit & life support | Suit power/O2/temperature replicated; Nutrition removed | Umbilical recharge (proximity sip is a prototype); haptic mass/friction movement; fabricator tool modes |
 | 2. Structural building | Socket snapping, support-budget solver, ghost-then-weld, tiers, storm damage | Replace budget solver with vector load solver + sag/warp visuals; free-placement layer; wiring/piping networks |
 | 3. Atmosphere & fluids | Oxygen generator machine only | Pressure volumes, airlocks, decompression forces, pipe flow simulation |
 | 4. Vehicles | Unified 25 cm grid, welded rigid body, emergent CoM/mass, thrusters, split detection; wheels with Bekker-Wong terramechanics per fixed physics substep (dual rigid/pneumatic regime, slip sinkage, Janosi-Hanamoto combined shear, compaction + bulldozing resistance, hub motors with copper loss, CTIS tire pressure, Ackermann steering) | Gearboxes/drive shafts/differentials as physical parts, tire wear/puncture, deformable tire meshes, persistent ruts, multi-pass sinkage |
-| 5. Industry & maintenance | Refine/fabricate machines with power-scaled crafting | Heat footprints/cooling, mechanical wear, part-swap repair (**current weld-to-repair is a placeholder that violates the no-healing-beam rule and must be replaced by part replacement**) |
+| 5. Industry & maintenance | Refine/fabricate machines with power-scaled crafting | Heat footprints/cooling; **causal condition** (section 10); part-swap repair (**current weld-to-repair is a placeholder that violates section 10 and must die with the first swappable class**) |
 | 6. Environment & weather | Replicated day/night + storms with per-tier structure damage | Volumetric storm fronts with drag forces, corrosion, telemetry/signal system, PCG world |
 | 7. Talents | Not started | Talent tree data model + the physical-calibration hooks per path (no stat boosts) |
 | 8. Diegetic UI | Not started (HUD events exposed as delegates) | Visor/wrist/dashboard instrument stack; delete any screen-space bars as this lands |
 
 Known conflicts to resolve as their systems come up (flagged, not silently
-changed): the weld-to-repair placeholder, and the CTIS tire-pressure valve
-being available to everyone with a full 20-300 kPa range - section 7 gates
-extreme decompression behind Heavy Off-Road Level 1, so when talents land the
-ungated minimum must rise to a debead floor (~60 kPa) with the talent
-unlocking the low band. (The `Nutrition` stat was removed as scoped.)
+changed): the weld-to-repair placeholder (section 10), and the CTIS
+tire-pressure valve being available to everyone with a full 20-300 kPa range
+- section 7 gates extreme decompression behind Heavy Off-Road Level 1, so
+when talents land the ungated minimum must rise to a debead floor (~60 kPa)
+with the talent unlocking the low band. (The `Nutrition` stat was removed as
+scoped.)
+
+---
+
+## 10. Causal maintenance (hard rules)
+
+Implementable detail: [design/maintenance.md](design/maintenance.md).
+Architecture seams: [ARCHITECTURE-V2.md](ARCHITECTURE-V2.md) §16.
+
+These rules bind every module that has a part, a structure, or a vehicle
+block. They are not optional flavor for a “decay pass.”
+
+### 10.1 Two channels
+
+1. **Immediate damage** (`Health`): a discrete event (impact, collapse,
+   puncture, burst). At 0 the part scraps or the piece is removed (existing
+   destruction paths).
+2. **Condition**: continuous physical state of a still-installed part
+   (tread depth, temperature, capacity fade, dust opacity, leak rate,
+   deflection). Spent by **causes** (use, overload, weather, fouling), not
+   by a global durability clock.
+
+Mixing them into one 0–1 bar is prohibited. Pawn health regen is not
+maintenance.
+
+### 10.2 Causes must be measured
+
+Condition changes because a quantity the sim already has (or will have)
+moved: slip ratio, wheel load `W`, copper-loss watts, storm intensity,
+exposure, support deficit time. If a designer cannot name the integral,
+the spend does not ship.
+
+### 10.3 Diagnosis is in engineering units
+
+Visor, wrist, and dash show mm, °C, kPa, kJ, L/s, kW — never “72%
+durability.” GAME-SCOPE section 8 still bans arcade bars.
+
+### 10.4 Repair verbs match the failure
+
+| Failure | Legal verb |
+|---|---|
+| Ghost / incomplete structure | Weld (construction) |
+| Weldable metal crack (immediate) | Weld patch |
+| Dust on solar / radio | Wipe / service |
+| Worn tread, faded battery, dead motor, spent panel | Replace with a fabricated spare |
+| Seal leak | Patch (temporary) or replace |
+| Unsupported structure | Rebuild / add support — not a heal |
+
+**Weld is not a healing beam.** Welding a Complete tire, battery, or dusty
+panel to restore condition is illegal. The current `RepairHealth` path on
+the build tool is a known violation and is deleted when the first
+swappable class (wheels) lands.
+
+### 10.5 Persistence
+
+Condition replicates with the part and round-trips through save/load and
+join-in-progress. A late client must not see a nominal tire where the
+host has 4 mm of tread.
+
+### 10.6 Talents
+
+Section 7 still wins: talents may add **readings and control** (overlays,
+CTIS low band, slip governor). They may not multiply wear by 0.8.

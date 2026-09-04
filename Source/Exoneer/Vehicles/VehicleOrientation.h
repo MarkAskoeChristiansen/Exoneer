@@ -33,6 +33,22 @@ namespace ExoneerVehicleOrientation
 	 */
 	EXONEER_API uint8 FindOrientationMappingAxis(const FVector& LocalAxis, const FVector& TargetWorld, float Tolerance = 0.01f);
 
+	/**
+	 * Orientation that maps BOTH local axes onto both world targets, which
+	 * pins the roll about the first one as well as its direction. Returns 0
+	 * when nothing matches.
+	 *
+	 * Four orientations map a given local axis onto a given world axis; they
+	 * differ only in roll about it, and for most blocks that roll is
+	 * cosmetic. It is not cosmetic for a thruster with a canted nozzle: the
+	 * aim axis chooses which way the jet points and the roll chooses which way
+	 * the cant leans, which is how a rail of lift thrusters is toed outboard
+	 * and therefore how the craft has any yaw authority. See
+	 * UVehicleBlockDefinitionDataAsset::NozzleCantDeg.
+	 */
+	EXONEER_API uint8 FindOrientationMappingAxes(const FVector& LocalAxisA, const FVector& TargetWorldA,
+		const FVector& LocalAxisB, const FVector& TargetWorldB, float Tolerance = 0.01f);
+
 	/** Next orientation when the player taps rotate: cycles yaw, then up axis. */
 	EXONEER_API uint8 CycleYaw(uint8 Orientation, int32 Steps = 1);
 	EXONEER_API uint8 CycleUpAxis(uint8 Orientation, int32 Steps = 1);

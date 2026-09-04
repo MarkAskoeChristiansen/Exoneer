@@ -28,7 +28,8 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Mining") float Range = 250.f;
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Mining") float Radius = 8.f;
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Mining") float DamagePerSec = 25.f;
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Mining") float SuitPowerDrainPerSec = 0.5f;
+	/** Suit power drain (kJ/s). 9 kJ/s keeps mining's share of the 1800 kJ bank identical to the old 0.5/100 units. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Mining") float SuitPowerDrainPerSec = 9.f;
 
 	/** How often mining intents are sent to the server while the beam is on. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Mining") float MineRateHz = 5.f;

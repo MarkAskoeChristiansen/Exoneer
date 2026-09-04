@@ -4,7 +4,6 @@
 #include "Interfaces/Interactable.h"
 #include "Components/CraftingComponent.h"
 #include "Data/RecipeDefinitionDataAsset.h"
-#include "Camera/CameraComponent.h"
 #include "GameFramework/Actor.h"
 #include "GameFramework/Pawn.h"
 #include "Engine/World.h"
@@ -22,20 +21,14 @@ bool UInteractionComponent::TraceForward(FHitResult& OutHit) const
 	AActor* Owner = GetOwner();
 	if (!Owner || !GetWorld()) return false;
 
-	const UCameraComponent* Cam = Owner->FindComponentByClass<UCameraComponent>();
+	// The owner's eyes, not "the first UCameraComponent on the actor": a pawn
+	// can carry more than one camera (visor plus chase boom) and that lookup
+	// returns an arbitrary one, which would start this ray metres behind the
+	// engineer. The server reach check uses the same point.
 	FVector Start;
-	FVector Dir;
-	if (Cam)
-	{
-		Start = Cam->GetComponentLocation();
-		Dir = Cam->GetForwardVector();
-	}
-	else
-	{
-		FRotator ViewRotation;
-		Owner->GetActorEyesViewPoint(Start, ViewRotation);
-		Dir = ViewRotation.Vector();
-	}
+	FRotator ViewRotation;
+	Owner->GetActorEyesViewPoint(Start, ViewRotation);
+	const FVector Dir = ViewRotation.Vector();
 	const FVector End = Start + Dir * TraceDistance;
 
 	FCollisionQueryParams Params(SCENE_QUERY_STAT(ExoneerInteract), false, Owner);
@@ -86,6 +79,21 @@ void UInteractionComponent::TickComponent(float DeltaTime, ELevelTick TickType, 
 		}
 		OnFocusChanged.Broadcast(NewFocus);
 	}
+}
+
+void UInteractionComponent::ClearFocus()
+{
+	AActor* Old = FocusedActor.Get();
+	if (!Old)
+	{
+		return;
+	}
+	FocusedActor = nullptr;
+	if (Old->Implements<UInteractable>())
+	{
+		IInteractable::Execute_OnFocusLost(Old, GetOwner());
+	}
+	OnFocusChanged.Broadcast(nullptr);
 }
 
 FGameplayTagContainer UInteractionComponent::GetFocusedInteractionTags() const

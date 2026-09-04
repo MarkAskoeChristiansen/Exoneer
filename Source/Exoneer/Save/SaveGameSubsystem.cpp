@@ -7,6 +7,7 @@
 #include "Vehicles/VehicleConstruct.h"
 #include "Player/PlayerSurvivalCharacter.h"
 #include "World/PlanetEnvironmentManager.h"
+#include "World/ExoneerGameState.h"
 #include "Data/PieceDefinitionDataAsset.h"
 #include "Data/VehicleBlockDefinitionDataAsset.h"
 #include "Data/ItemDefinitionDataAsset.h"
@@ -87,6 +88,7 @@ UExoneerSaveGame* USaveGameSubsystem::GatherWorldState() const
 			Save->PlayerOxygen      = P->Survival->Oxygen;
 			Save->PlayerSuitPower   = P->Survival->SuitPower;
 			Save->PlayerBodyTempC   = P->Survival->GetBodyTemperature();
+			Save->PlayerSuitCondition = P->Survival->SuitCondition;
 		}
 	}
 
@@ -112,6 +114,7 @@ UExoneerSaveGame* USaveGameSubsystem::GatherWorldState() const
 			Rec.StageIndex = Piece->Construction->GetStageIndex();
 			Rec.StageProgress01 = Piece->Construction->GetStageProgress01();
 			Rec.Health = Piece->Health;
+			Rec.Condition = Piece->Condition;
 
 			// Invested ledger, so deconstruction still refunds after a load.
 			for (const FInventoryStack& Stack : Piece->Construction->GetInvestedMaterials())
@@ -154,6 +157,7 @@ UExoneerSaveGame* USaveGameSubsystem::GatherWorldState() const
 			Rec.Phase = static_cast<uint8>(Block.Phase);
 			Rec.Health = Block.Health;
 			Rec.StateScalar = Block.StateScalar;
+			Rec.Condition = Block.Condition;
 			if (Block.Def->bIsWheel)
 			{
 				It->GetWheelPersistentState(Block.BlockInstanceId, Rec.TirePressureKPa, Rec.SteerTrimDeg);
@@ -164,6 +168,13 @@ UExoneerSaveGame* USaveGameSubsystem::GatherWorldState() const
 		{
 			Save->Vehicles.Add(MoveTemp(Vehicle));
 		}
+	}
+
+	if (AExoneerGameState* GS = World->GetGameState<AExoneerGameState>())
+	{
+		Save->Projects = GS->Projects;
+		Save->Orbital = GS->Orbital;
+		Save->SolIndex = GS->SolIndex;
 	}
 
 	return Save;
@@ -206,6 +217,7 @@ void USaveGameSubsystem::ApplyWorldState(UExoneerSaveGame* Save)
 			P->Survival->Oxygen     = Save->PlayerOxygen;
 			P->Survival->SuitPower  = Save->PlayerSuitPower;
 			P->Survival->BodyTempC  = Save->PlayerBodyTempC;
+			P->Survival->SuitCondition = Save->PlayerSuitCondition;
 		}
 		if (P->HealthC)
 		{
@@ -225,6 +237,13 @@ void USaveGameSubsystem::ApplyWorldState(UExoneerSaveGame* Save)
 	ClearBuiltWorld(World);
 	ApplyStructures(World, Save);
 	ApplyVehicles(World, Save);
+
+	if (AExoneerGameState* GS = World->GetGameState<AExoneerGameState>())
+	{
+		GS->Projects = Save->Projects;
+		GS->Orbital = Save->Orbital;
+		GS->SolIndex = Save->SolIndex;
+	}
 }
 
 void USaveGameSubsystem::ClearBuiltWorld(UWorld* World) const
@@ -415,6 +434,7 @@ void USaveGameSubsystem::RestorePieceState(ABasePiece* Piece, const FSavedBasePi
 
 	const float MaxHealth = Piece->Def ? Piece->Def->MaxHealth : Saved.Health;
 	Piece->Health = FMath::Clamp(Saved.Health, 0.f, MaxHealth);
+	Piece->Condition = Saved.Condition;
 
 	if (AMachinePiece* Machine = Cast<AMachinePiece>(Piece))
 	{
@@ -429,6 +449,11 @@ void USaveGameSubsystem::RestorePieceState(ABasePiece* Piece, const FSavedBasePi
 				}
 			}
 		}
+		// Condition is already assigned above, so re-applying the definition
+		// stats here is what turns a saved capacity fade into the derated
+		// StorageCapacity the stored joules are then clamped into. Without
+		// this the pack would come back from disk at its rating.
+		Machine->ApplyDefinitionStats();
 		if (Machine->Power)
 		{
 			const float Capacity = Machine->Power->StorageCapacity;
@@ -573,4 +598,5 @@ void USaveGameSubsystem::RestoreVehicleBlockRecord(AVehicleConstruct* Construct,
 		Saved.Health,
 		Saved.StateScalar,
 		bRestoreOrientation ? static_cast<int32>(Saved.Orientation) : -1);
+	Construct->RestoreBlockCondition(BlockInstanceId, Saved.Condition);
 }

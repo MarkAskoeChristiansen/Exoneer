@@ -13,8 +13,7 @@ enum class EExoneerRecipeStation : uint8
 	PlayerHand,
 	Fabricator,
 	Refinery,
-	OxygenGenerator,
-	FoodPrinter
+	OxygenGenerator
 };
 
 USTRUCT(BlueprintType)

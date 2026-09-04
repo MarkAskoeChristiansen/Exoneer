@@ -30,6 +30,17 @@ namespace ExoneerTerramechanics
 		float ShearK = 0.025f;            // m, longitudinal Janosi shear deformation modulus
 		float ShearKy = 0.030f;           // m, lateral shear deformation modulus
 		float UnitWeight = 15700.f;       // N/m^3, feeds bulldozing resistance
+
+		/**
+		 * True when this contact is rubber on a HARD surface, not a grouser in
+		 * soil. Only FirmGroundDefault sets it: there tan(phi) is the hit
+		 * material's own Friction, i.e. the rubber-on-surface interface
+		 * coefficient, and the compliance that decides how fast force builds
+		 * with slip belongs to the TREAD (millimetres), not to a soil bed
+		 * (centimetres). Readers use it to pick the tire's own interface
+		 * constants instead of the soil-shear ones.
+		 */
+		bool bCoulombInterface = false;
 	};
 
 	/**

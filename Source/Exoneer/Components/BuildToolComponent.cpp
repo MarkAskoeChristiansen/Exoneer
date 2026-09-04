@@ -9,7 +9,6 @@
 #include "Vehicles/VehicleConstruct.h"
 #include "Vehicles/VehicleOrientation.h"
 #include "Interfaces/Constructible.h"
-#include "Camera/CameraComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Materials/MaterialInterface.h"
 #include "Engine/StaticMesh.h"
@@ -18,6 +17,7 @@
 #include "GameFramework/Pawn.h"
 #include "DrawDebugHelpers.h"
 #include "Exoneer.h"
+#include "ExoneerGameplayTags.h"
 
 namespace
 {
@@ -61,6 +61,11 @@ namespace
 		return true;
 	}
 
+	bool IsTerrainPlaceable(const UPieceDefinitionDataAsset* Def)
+	{
+		return Def && (Def->bGroundable || Def->MountTag == ExoneerTags::Mount_Deployable);
+	}
+
 	/** Upright placement transform at the hit point, yawed to the view. */
 	FTransform MakeGroundedTransform(const AActor* Viewer, const FHitResult& Hit, int32 YawSteps)
 	{
@@ -101,22 +106,66 @@ namespace
 	};
 
 	/**
-	 * Thrusters push along block local -X: six aim directions, UP first
-	 * (hover thrust is the common case). Cycling 24 raw orientations to aim
-	 * one thruster was the opposite of an interface.
+	 * Thrusters push along block local -X: six aim directions, UP first (hover
+	 * thrust is the common case), and each aim offered TWICE because the NOZZLE
+	 * IS CANTED and the lean is a placement decision, not a cosmetic one.
+	 *
+	 * THIS IS THE LIST THAT DECIDES WHETHER A PLAYER-BUILT CRAFT CAN FLY. The
+	 * jet leaves the block a few degrees off its own -X face
+	 * (UVehicleBlockDefinitionDataAsset::NozzleCantDeg), so four of the 24
+	 * orientations aim a unit the same way and differ only in which way the jet
+	 * leans. That lean is where a craft made of parallel lift nozzles gets ALL
+	 * of its yaw authority: toed outboard on each rail, uniform throttle makes
+	 * no yaw at all while a diagonal trim across the four corner units is a
+	 * pure yaw couple with no net force.
+	 *
+	 * The previous list offered one entry per aim, built from the ONE-AXIS
+	 * FindOrientationMappingAxis, so every unit a player aimed "up" got the
+	 * same orientation index and therefore the same lean. Six of them at the
+	 * hover collective are 6 * 4000 * sin(6 deg) * 0.763 = 1904 N of net side
+	 * thrust - 1.03 m/s^2 of permanent, uncancellable drift, because the trim
+	 * path nulls only the net TRIM force and flight has no lateral thrust
+	 * command at all. The one thing a player could not build was the balanced
+	 * layout the shipped rover uses, because only the spawner could reach the
+	 * two-axis helper.
+	 *
+	 * TWELVE ENTRIES, NOT TWENTY-FOUR. The lean axis is fixed per aim by one
+	 * rule: the first construct axis perpendicular to the aim, taken in the
+	 * order Y, Z. Vertical and fore/aft aims therefore lean LEFT or RIGHT (the
+	 * pair that toes a rail and makes yaw), and sideways aims lean UP or DOWN.
+	 * The two remaining rolls of each aim are the same jet mirrored about an
+	 * axis the craft does not care about, so nothing flyable is lost.
 	 */
 	const TArray<FCuratedOrientation>& GetThrustOrientations()
 	{
 		static const TArray<FCuratedOrientation> Set = []
 		{
 			const FVector& ThrustAxis = ExoneerThruster::LocalThrustAxis;
+			// The block's own local +Y is the direction the jet leans, so
+			// pinning it onto a construct axis pins the toe.
+			const FVector& CantAxis = FVector::YAxisVector;
+			auto Aim = [&ThrustAxis, &CantAxis](const FVector& Target, const FVector& Lean)
+			{
+				return ExoneerVehicleOrientation::FindOrientationMappingAxes(
+					ThrustAxis, Target, CantAxis, Lean);
+			};
+			const FVector L = -FVector::YAxisVector;   // toe left
+			const FVector R = FVector::YAxisVector;    // toe right
+			const FVector U = FVector::ZAxisVector;    // toe up
+			const FVector Dn = -FVector::ZAxisVector;  // toe down
 			return TArray<FCuratedOrientation>{
-				{ ExoneerVehicleOrientation::FindOrientationMappingAxis(ThrustAxis, FVector::UpVector), TEXT("THRUST: UP") },
-				{ ExoneerVehicleOrientation::FindOrientationMappingAxis(ThrustAxis, FVector::ForwardVector), TEXT("THRUST: FORWARD") },
-				{ ExoneerVehicleOrientation::FindOrientationMappingAxis(ThrustAxis, FVector::BackwardVector), TEXT("THRUST: BACK") },
-				{ ExoneerVehicleOrientation::FindOrientationMappingAxis(ThrustAxis, FVector::LeftVector), TEXT("THRUST: LEFT") },
-				{ ExoneerVehicleOrientation::FindOrientationMappingAxis(ThrustAxis, FVector::RightVector), TEXT("THRUST: RIGHT") },
-				{ ExoneerVehicleOrientation::FindOrientationMappingAxis(ThrustAxis, FVector::DownVector), TEXT("THRUST: DOWN") },
+				{ Aim(FVector::UpVector, L),        TEXT("THRUST: UP  TOE L") },
+				{ Aim(FVector::UpVector, R),        TEXT("THRUST: UP  TOE R") },
+				{ Aim(FVector::ForwardVector, L),   TEXT("THRUST: FORWARD  TOE L") },
+				{ Aim(FVector::ForwardVector, R),   TEXT("THRUST: FORWARD  TOE R") },
+				{ Aim(FVector::BackwardVector, L),  TEXT("THRUST: BACK  TOE L") },
+				{ Aim(FVector::BackwardVector, R),  TEXT("THRUST: BACK  TOE R") },
+				{ Aim(FVector::LeftVector, U),      TEXT("THRUST: LEFT  TOE UP") },
+				{ Aim(FVector::LeftVector, Dn),     TEXT("THRUST: LEFT  TOE DN") },
+				{ Aim(FVector::RightVector, U),     TEXT("THRUST: RIGHT  TOE UP") },
+				{ Aim(FVector::RightVector, Dn),    TEXT("THRUST: RIGHT  TOE DN") },
+				{ Aim(FVector::DownVector, L),      TEXT("THRUST: DOWN  TOE L") },
+				{ Aim(FVector::DownVector, R),      TEXT("THRUST: DOWN  TOE R") },
 			};
 		}();
 		return Set;
@@ -283,17 +332,12 @@ bool UBuildToolComponent::AimTrace(FHitResult& OutHit) const
 		return false;
 	}
 
+	// The owner's eyes, not "the first UCameraComponent on the actor": a pawn
+	// can carry more than one camera (visor plus chase boom) and that lookup
+	// returns an arbitrary one. The server reach check uses the same point.
 	FVector Start;
 	FRotator ViewRot;
-	if (const UCameraComponent* Cam = Owner->FindComponentByClass<UCameraComponent>())
-	{
-		Start = Cam->GetComponentLocation();
-		ViewRot = Cam->GetComponentRotation();
-	}
-	else
-	{
-		Owner->GetActorEyesViewPoint(Start, ViewRot);
-	}
+	Owner->GetActorEyesViewPoint(Start, ViewRot);
 	const FVector End = Start + ViewRot.Vector() * PlacementRange;
 
 	FCollisionQueryParams Params(SCENE_QUERY_STAT(ExoneerBuildAim), false, Owner);
@@ -397,7 +441,7 @@ void UBuildToolComponent::UpdateBasePreview(const FHitResult& Hit)
 	// Aiming at terrain (or anything else): groundable pieces may snap there.
 	if (Hit.bBlockingHit && !Cast<AVehicleConstruct>(Hit.GetActor()))
 	{
-		if (!SelectedPiece->bGroundable)
+		if (!IsTerrainPlaceable(SelectedPiece))
 		{
 			SetPreviewState(false, EBuildPlacementError::NoTarget, FTransform::Identity);
 			return;
@@ -635,7 +679,20 @@ bool UBuildToolComponent::TryConfirmPlacement()
 
 void UBuildToolComponent::SetWeldActive(bool bActive)
 {
+	if (bActive && !bWeldActive)
+	{
+		// A new press. Its id rides on every batch the press produces, so the
+		// server can tell the deliberate press apart from the tail of a hold
+		// without guessing from timing or from what the beam happens to touch.
+		++WeldPressId;
+		bWeldPressBatchPending = true;
+	}
 	bWeldActive = bActive;
+	if (!bWeldActive)
+	{
+		bWeldPressBatchPending = false;
+		bLiveWeldTargetValid = false;
+	}
 	if (!bWeldActive && !bDeconstructActive)
 	{
 		WeldRpcAccumulator = 0.f;
@@ -659,17 +716,12 @@ bool UBuildToolComponent::WeldAimSweep(FHitResult& OutHit) const
 		return false;
 	}
 
+	// The owner's eyes, not "the first UCameraComponent on the actor": a pawn
+	// can carry more than one camera (visor plus chase boom) and that lookup
+	// returns an arbitrary one. The server reach check uses the same point.
 	FVector Start;
 	FRotator ViewRot;
-	if (const UCameraComponent* Cam = Owner->FindComponentByClass<UCameraComponent>())
-	{
-		Start = Cam->GetComponentLocation();
-		ViewRot = Cam->GetComponentRotation();
-	}
-	else
-	{
-		Owner->GetActorEyesViewPoint(Start, ViewRot);
-	}
+	Owner->GetActorEyesViewPoint(Start, ViewRot);
 	const FVector End = Start + ViewRot.Vector() * PlacementRange;
 
 	FCollisionQueryParams Params(SCENE_QUERY_STAT(ExoneerWeldAim), false, Owner);
@@ -682,6 +734,9 @@ void UBuildToolComponent::TickWeldBeam(float DeltaTime)
 	if (!bWeldActive && !bDeconstructActive)
 	{
 		WeldRpcAccumulator = 0.f;
+		bLiveWeldTargetValid = false;
+		LastWeldTargetId = ExoneerConstruction::NoTargetId;
+		WeldFeedbackTarget = nullptr;
 		return;
 	}
 
@@ -703,8 +758,38 @@ void UBuildToolComponent::TickWeldBeam(float DeltaTime)
 	}
 #endif
 
+	// Build progress at frame rate, of the block that ACTUALLY took the work.
+	// The 5 Hz server feedback still says WHY a weld stalls, and it also names
+	// the target; the percentage itself is read here off the replicated
+	// construction state, so the readout counts every value on the way to 100
+	// instead of stepping once per flush.
+	//
+	// Sampling by aim point instead is what made this read 100 percent early:
+	// the sweep is 14 cm and a block is 25 cm, so while welding a ghost beside
+	// a finished block the point resolves to the FINISHED one, and a
+	// point-addressed progress query answers 1.0 for it - and for a clean miss
+	// too. Identity removes both cases.
+	AActor* FeedbackTarget = WeldFeedbackTarget.Get();
+	if (bConstructible && FeedbackTarget == Target && LastWeldTargetId != ExoneerConstruction::NoTargetId)
+	{
+		const float Progress01 = IConstructible::Execute_GetConstructionProgressForTarget(Target, LastWeldTargetId);
+		bLiveWeldTargetValid = Progress01 >= 0.f;
+		if (bLiveWeldTargetValid)
+		{
+			LiveWeldProgress01 = FMath::Clamp(Progress01, 0.f, 1.f);
+		}
+	}
+	else
+	{
+		bLiveWeldTargetValid = false;
+	}
+
+	// The first batch of a press flushes as soon as the beam finds something:
+	// a deliberate press must not have to be held for a flush interval before
+	// the server hears about it, and progress starts moving on contact.
 	const float FlushPoints = WeldPointsPerSec * WeldFlushInterval;
-	if (WeldRpcAccumulator < FlushPoints)
+	const bool bFirstBatchOfPress = bWeldActive && bWeldPressBatchPending;
+	if (WeldRpcAccumulator < FlushPoints && !(bFirstBatchOfPress && bConstructible))
 	{
 		return;
 	}
@@ -715,6 +800,8 @@ void UBuildToolComponent::TickWeldBeam(float DeltaTime)
 	{
 		LastWeldResult = 4;
 		LastWeldProgress01 = 0.f;
+		LastWeldTargetId = ExoneerConstruction::NoTargetId;
+		WeldFeedbackTarget = nullptr;
 		LastWeldFeedbackSeconds = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f;
 		return;
 	}
@@ -724,7 +811,9 @@ void UBuildToolComponent::TickWeldBeam(float DeltaTime)
 
 	if (bWeldActive)
 	{
-		Server_Weld(Target, Hit.ImpactPoint, Points);
+		bWeldPressBatchPending = false;
+		WeldFeedbackTarget = Target;
+		Server_Weld(Target, Hit.ImpactPoint, Points, WeldPressId);
 	}
 	else
 	{
@@ -732,11 +821,12 @@ void UBuildToolComponent::TickWeldBeam(float DeltaTime)
 	}
 }
 
-void UBuildToolComponent::Client_WeldFeedback_Implementation(uint8 Result, float Progress01)
+void UBuildToolComponent::Client_WeldFeedback_Implementation(uint8 Result, float Progress01, int32 TargetId)
 {
 	// The visor HUD polls these; no direct drawing from the component.
 	LastWeldResult = Result;
 	LastWeldProgress01 = Progress01;
+	LastWeldTargetId = TargetId;
 	LastWeldFeedbackSeconds = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f;
 }
 
@@ -835,7 +925,7 @@ bool UBuildToolComponent::Server_PlaceGroundedPiece_Validate(UPieceDefinitionDat
 
 void UBuildToolComponent::Server_PlaceGroundedPiece_Implementation(UPieceDefinitionDataAsset* Def, FTransform Transform)
 {
-	if (!Def || !Def->bGroundable)
+	if (!Def || !(Def->bGroundable || Def->MountTag == ExoneerTags::Mount_Deployable))
 	{
 		return;
 	}
@@ -908,7 +998,7 @@ void UBuildToolComponent::Server_FoundVehicleConstruct_Implementation(UVehicleBl
 	}
 }
 
-bool UBuildToolComponent::Server_Weld_Validate(AActor* Target, FVector_NetQuantize WorldPoint, float WeldPoints)
+bool UBuildToolComponent::Server_Weld_Validate(AActor* Target, FVector_NetQuantize WorldPoint, float WeldPoints, uint8 PressId)
 {
 	// Generous sanity cap only - a lagged/hitched honest client may batch big;
 	// the implementation clamps the applied budget to one second of work.
@@ -916,7 +1006,21 @@ bool UBuildToolComponent::Server_Weld_Validate(AActor* Target, FVector_NetQuanti
 	return FMath::IsFinite(WeldPoints) && WeldPoints >= 0.f && WeldPoints <= FMath::Max(WeldPointsPerSec, 1.f) * 60.f;
 }
 
-void UBuildToolComponent::Server_Weld_Implementation(AActor* Target, FVector_NetQuantize WorldPoint, float WeldPoints)
+void UBuildToolComponent::Server_Weld_Implementation(AActor* Target, FVector_NetQuantize WorldPoint, float WeldPoints, uint8 PressId)
+{
+	// A press id the server has not seen is the first batch of a new press;
+	// every repeat of the same id is the tail of that hold. The boundary is
+	// carried by the batch rather than inferred from timing, in line with the
+	// _Validate policy above, and rather than from what the beam resolves to,
+	// which changes on any aim wobble.
+	const bool bFreshPress = !bServerWeldPressSeen || PressId != ServerWeldPressId;
+	ServerWeldPressId = PressId;
+	bServerWeldPressSeen = true;
+
+	ServerApplyWeld(Target, WorldPoint, WeldPoints, bFreshPress);
+}
+
+void UBuildToolComponent::ServerApplyWeld(AActor* Target, const FVector& WorldPoint, float WeldPoints, bool bFreshPress)
 {
 	if (!IsValid(Target) || !Target->Implements<UConstructible>() || WeldPoints <= 0.f)
 	{
@@ -936,7 +1040,7 @@ void UBuildToolComponent::Server_Weld_Implementation(AActor* Target, FVector_Net
 	{
 		if (Stats->SuitPower <= 0.f)
 		{
-			Client_WeldFeedback(1, 0.f);   // Empty suit: the silent killer.
+			Client_WeldFeedback(1, 0.f, ExoneerConstruction::NoTargetId);   // Empty suit: the silent killer.
 			return;
 		}
 		if (SuitPowerPerWeldPoint > 0.f)
@@ -946,45 +1050,108 @@ void UBuildToolComponent::Server_Weld_Implementation(AActor* Target, FVector_Net
 	}
 	if (Budget <= 0.f)
 	{
-		Client_WeldFeedback(1, 0.f);
+		Client_WeldFeedback(1, 0.f, ExoneerConstruction::NoTargetId);
 		return;
 	}
 
-	float Applied = IConstructible::Execute_InvestConstruction(Target, Owner, GetOwnerInventory(), WorldPoint, Budget);
-	const EConstructionPhase PhaseNow = IConstructible::Execute_GetConstructionPhaseAt(Target, WorldPoint);
-
-	// Nothing left to invest: welding a Complete, damaged target repairs it.
-	if (Applied <= 0.f && PhaseNow == EConstructionPhase::Complete)
-	{
-		float Healed = 0.f;
-		if (ABasePiece* Piece = Cast<ABasePiece>(Target))
-		{
-			Healed = Piece->RepairHealth(Budget * RepairHealthPerWeldPoint);
-		}
-		else if (AVehicleConstruct* Construct = Cast<AVehicleConstruct>(Target))
-		{
-			Healed = Construct->RepairBlockAt(WorldPoint, Budget * RepairHealthPerWeldPoint);
-		}
-		if (Healed > 0.f && RepairHealthPerWeldPoint > 0.f)
-		{
-			Applied = Healed / RepairHealthPerWeldPoint;
-		}
-	}
-
+	// Investing is always legal, on any batch of any press: welding a ghost is
+	// what the beam is for and a hold must keep grinding until the part is
+	// Complete.
+	// The work reports WHICH target took it. On a moving construct the aim
+	// often grazes the finished neighbour of the intended ghost, so the target
+	// under WorldPoint and the target that took the weld are not the same
+	// thing - echo the one that took it, or the readout jumps to 100 percent
+	// before the block is done.
+	int32 WeldedTargetId = ExoneerConstruction::NoTargetId;
+	const float Applied = IConstructible::Execute_InvestConstruction(Target, Owner, GetOwnerInventory(), WorldPoint, Budget, WeldedTargetId);
 	if (Applied > 0.f)
 	{
 		if (Stats)
 		{
 			Stats->AddSuitPower(-Applied * SuitPowerPerWeldPoint);
 		}
-		Client_WeldFeedback(0, IConstructible::Execute_GetConstructionProgressAt(Target, WorldPoint));
+		const float Progress01 = FMath::Clamp(
+			IConstructible::Execute_GetConstructionProgressForTarget(Target, WeldedTargetId), 0.f, 1.f);
+		Client_WeldFeedback(0, Progress01, WeldedTargetId);
+		return;
 	}
-	else
+
+	// Nothing left to invest here. Everything below either spends a fabricated
+	// spare or clears a surface, so it is reachable ONLY from the first batch
+	// of a deliberate press. The tail of the hold that just finished a weld
+	// falls out here and does nothing - which is the whole point: overholding
+	// the beam a moment too long must never touch the part it just built.
+	const EConstructionPhase PhaseNow = IConstructible::Execute_GetConstructionPhaseAt(Target, WorldPoint);
+	if (!bFreshPress)
 	{
-		// Zero progress with budget available: complete target, or the next
-		// material unit is missing from the player's inventory.
-		Client_WeldFeedback(PhaseNow == EConstructionPhase::Complete ? 3 : 2, 0.f);
+		// Still report the honest reason - a hold stalled on a missing material
+		// unit must not read as "target complete".
+		Client_WeldFeedback(PhaseNow == EConstructionPhase::Complete ? 3 : 2,
+			PhaseNow == EConstructionPhase::Complete ? 1.f : 0.f,
+			ExoneerConstruction::NoTargetId);
+		return;
 	}
+
+	// A resolved construction target that reads Complete. Resolve it
+	// explicitly: both GetConstructionPhaseAt implementations answer "Complete"
+	// for a point that names NO target at all, so the phase alone would route
+	// the maintenance verbs off a miss.
+	if (AVehicleConstruct* Construct = Cast<AVehicleConstruct>(Target))
+	{
+		const int32 BlockId = Construct->FindBlockAtWorldPoint(WorldPoint);
+		const FVehicleBlockRecord* Record = Construct->FindRecord(BlockId);
+		if (!Record || Record->Phase != EConstructionPhase::Complete)
+		{
+			Client_WeldFeedback(BlockId == INDEX_NONE ? 4 : 2, 0.f, ExoneerConstruction::NoTargetId);
+			return;
+		}
+		if (Construct->WipePartAt(WorldPoint))
+		{
+			Client_WeldFeedback(7, 1.f, ExoneerConstruction::NoTargetId);
+			return;
+		}
+		if (Construct->ReplacePartAt(WorldPoint, GetOwnerInventory()))
+		{
+			if (Stats)
+			{
+				Stats->AddSuitPower(-Budget * SuitPowerPerWeldPoint);
+			}
+			Client_WeldFeedback(6, 1.f, ExoneerConstruction::NoTargetId);
+			return;
+		}
+		Client_WeldFeedback(3, 1.f, ExoneerConstruction::NoTargetId);
+		return;
+	}
+
+	if (ABasePiece* Piece = Cast<ABasePiece>(Target))
+	{
+		if (PhaseNow != EConstructionPhase::Complete)
+		{
+			Client_WeldFeedback(2, 0.f, ExoneerConstruction::NoTargetId); // missing materials
+			return;
+		}
+		// Terminal reading first: a spent battery pack takes the fabricated
+		// spare its definition names. Dust never reaches here - wipe clears
+		// dust in full and is the only dust verb - so the two cannot race.
+		if (Piece->ReplacePart(GetOwnerInventory()))
+		{
+			if (Stats)
+			{
+				Stats->AddSuitPower(-Budget * SuitPowerPerWeldPoint);
+			}
+			Client_WeldFeedback(6, 1.f, ExoneerConstruction::NoTargetId);
+			return;
+		}
+		if (Piece->WipeDust())
+		{
+			Client_WeldFeedback(7, 1.f, ExoneerConstruction::NoTargetId);
+			return;
+		}
+		Client_WeldFeedback(3, 1.f, ExoneerConstruction::NoTargetId);
+		return;
+	}
+
+	Client_WeldFeedback(PhaseNow == EConstructionPhase::Complete ? 3 : 2, 0.f, ExoneerConstruction::NoTargetId);
 }
 
 bool UBuildToolComponent::Server_Deconstruct_Validate(AActor* Target, FVector_NetQuantize WorldPoint, float WreckPoints)

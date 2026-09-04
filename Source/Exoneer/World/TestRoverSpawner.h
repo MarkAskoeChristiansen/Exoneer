@@ -30,6 +30,14 @@ class EXONEER_API ATestRoverSpawner : public AActor
 
 public:
 	ATestRoverSpawner();
+	virtual void Tick(float DeltaSeconds) override;
+
+	/**
+	 * SERVER test-range fixture. Seats the local engineer and flies a fixed
+	 * 26-second climb/hover/translate/roll/yaw/descend profile through the real
+	 * vehicle router and Chaos body. Console: exoneer.FlightProfile
+	 */
+	void StartAutomatedFlightProfile();
 
 	/** No new rover if a construct already exists within this range (uu). */
 	UPROPERTY(EditAnywhere, Category = "Spawner")
@@ -49,4 +57,21 @@ protected:
 	virtual void BeginPlay() override;
 
 	void SpawnRover();
+
+	TWeakObjectPtr<class AVehicleConstruct> SpawnedRover;
+	TWeakObjectPtr<class APlayerSurvivalCharacter> FlightTestPilot;
+	bool bFlightProfileActive = false;
+	float FlightProfileTime = 0.f;
+	float FlightProfileLogTime = 0.f;
+	float FlightProfileMaxClimbMS = 0.f;
+	float FlightProfileHoverVerticalMS = 0.f;
+	float FlightProfileMaxForwardMS = 0.f;
+	float FlightProfileMaxBankDeg = 0.f;
+	float FlightProfileLevelBankDeg = 0.f;
+	float FlightProfileYawTravelDeg = 0.f;
+	float FlightProfileMinDescentMS = 0.f;
+	float FlightProfileMaxGyro01 = 0.f;
+	float FlightProfileMinEnergyKJ = TNumericLimits<float>::Max();
+	float FlightProfileLastYawDeg = 0.f;
+	bool bFlightProfileInverted = false;
 };

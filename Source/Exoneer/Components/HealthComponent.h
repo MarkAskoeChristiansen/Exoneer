@@ -19,7 +19,7 @@ public:
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Health") float MaxHealth = 100.f;
 	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category = "Health") float Health = 100.f;
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Health") float RegenPerSec = 1.f;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Health") float RegenPerSec = 0.f;
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Health") float RegenDelay = 5.f;
 
 	UPROPERTY(BlueprintAssignable) FOnHealthChanged OnHealthChanged;

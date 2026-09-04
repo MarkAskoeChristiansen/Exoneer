@@ -16,6 +16,7 @@ namespace ExoneerTags
 	EXONEER_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(Interaction_Use);
 	EXONEER_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(Interaction_OpenContainer);
 	EXONEER_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(Interaction_Pilot);
+	EXONEER_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(Interaction_Connect);
 
 	// Base piece mount types
 	EXONEER_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(Mount_Foundation);

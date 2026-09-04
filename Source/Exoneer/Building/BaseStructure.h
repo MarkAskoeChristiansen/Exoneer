@@ -65,6 +65,20 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Structure")
 	void RecomputeSupport();
 
+	/**
+	 * SERVER. Arm (or keep) the 5 Hz live-load pass. Idempotent and cheap:
+	 * called from every wheel report, it only creates the timer when the pass
+	 * is not already running and restarts the idle countdown.
+	 */
+	void ArmLoadTimer();
+
+	/**
+	 * SERVER. Drain every piece's live-load accumulators, publish the reading,
+	 * spend permanent set and flag gross overloads. Runs from the load timer;
+	 * public so a test can step it without a clock.
+	 */
+	void ServiceLoadReports();
+
 	/** Is Parent's socket already filled? (Surface sockets never fill.) */
 	UFUNCTION(BlueprintPure, Category = "Structure")
 	bool IsSocketOccupied(const ABasePiece* Parent, FName Socket) const;
@@ -83,6 +97,10 @@ public:
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 
 protected:
+	/** SERVER. Live-load pass, armed by wheel reports and self-disarming when they stop. */
+	FTimerHandle LoadTimerHandle;
+	float LoadReportIdleSeconds = 0.f;
+
 	/** SERVER. Occupied one-shot sockets: key = (parent piece, socket name). */
 	TMap<TPair<TWeakObjectPtr<const ABasePiece>, FName>, TWeakObjectPtr<ABasePiece>> OccupiedSockets;
 

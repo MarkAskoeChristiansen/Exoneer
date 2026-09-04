@@ -49,6 +49,13 @@ public:
 	/** Begin an interaction with the focused actor. Safe to call on any machine. */
 	UFUNCTION(BlueprintCallable, Category = "Interaction") bool TryInteract();
 
+	/**
+	 * Drop the current focus and fire the lost-focus cosmetics. Used when the
+	 * owner stops aiming at all - seated in a cockpit, for one - so a stale
+	 * highlight and prompt do not stay latched on the last thing looked at.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Interaction") void ClearFocus();
+
 	// --- Machine UI intents (client -> server via this connection-owned component) ---
 
 	UFUNCTION(BlueprintCallable, Category = "Interaction") void RequestEnqueueRecipe(UCraftingComponent* Crafting, URecipeDefinitionDataAsset* Recipe);

@@ -1,9 +1,17 @@
 // Copyright Exoneer contributors.
 #include "Components/OxygenComponent.h"
+#include "Net/UnrealNetwork.h"
 
 UOxygenComponent::UOxygenComponent()
 {
 	PrimaryComponentTick.bCanEverTick = false;
+	SetIsReplicatedByDefault(true);
+}
+
+void UOxygenComponent::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
+{
+	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
+	DOREPLIFETIME(UOxygenComponent, Stored);
 }
 
 float UOxygenComponent::Deposit(float Amount)

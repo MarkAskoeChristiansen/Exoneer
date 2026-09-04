@@ -3,18 +3,18 @@
 
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
+#include "ExoneerTypes.h"
 #include "SurvivalStatsComponent.generated.h"
+
+class UInventoryComponent;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnStatChanged, float, NormalizedValue);
 
 /**
- * Holds the player's survival "vitals" — Oxygen, SuitPower, Temperature.
- * No hunger/thirst by design (GAME-SCOPE.md module 1: tension comes from
- * engineering failures and suit resources, not biological micromanagement).
- * Health lives in UHealthComponent.
- *
- * Values are stored in raw units; UI consumes the normalized 0..1 helpers.
- * Survival damage is applied via the owning actor's IDamageable interface.
+ * Holds the player's survival vitals: suit O2 (litres), suit power (kJ),
+ * body temperature, and the suit seal's causal condition (leak L/s, patch
+ * count). No hunger/thirst by design (GAME-SCOPE.md module 1). Health lives
+ * in UHealthComponent.
  *
  * SERVER simulates the drains and applies critical damage; the raw values
  * replicate with RepNotify broadcasts so client HUDs track the authoritative
@@ -32,20 +32,22 @@ public:
 	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* TickFn) override;
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 
-	// ---- Oxygen ----
-	// Prototype-friendly default drains: no refill loops are wired yet, so the
-	// suit lasts a play session. Tighten these when umbilical recharge and
-	// oxygen consumption land (GAME-SCOPE.md module 1).
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Survival|Oxygen") float MaxOxygen = 100.f;
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Survival|Oxygen") float OxygenDrainPerSec = 0.05f;
+	// ---- Oxygen (litres) ----
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Survival|Oxygen") float SuitO2CapacityL = 100.f;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Survival|Oxygen") float MetabolicO2Lps = 0.05f;
 	UPROPERTY(ReplicatedUsing = OnRep_Oxygen, VisibleInstanceOnly, BlueprintReadOnly, Category = "Survival|Oxygen") float Oxygen = 100.f;
 	UPROPERTY(BlueprintAssignable) FOnStatChanged OnOxygenChanged;
 
-	// ---- Suit Power ----
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Survival|SuitPower") float MaxSuitPower = 100.f;
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Survival|SuitPower") float SuitPowerDrainPerSec = 0.03f;
-	UPROPERTY(ReplicatedUsing = OnRep_SuitPower, VisibleInstanceOnly, BlueprintReadOnly, Category = "Survival|SuitPower") float SuitPower = 100.f;
+	// ---- Suit Power (kJ, drain in watts) ----
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Survival|SuitPower") float SuitPowerCapacityKJ = 1800.f;
+	/** Idle draw (W). 540 W empties 1800 kJ in the same 3333 s the old 100/0.03 units did. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Survival|SuitPower") float SuitPowerDrainW = 540.f;
+	UPROPERTY(ReplicatedUsing = OnRep_SuitPower, VisibleInstanceOnly, BlueprintReadOnly, Category = "Survival|SuitPower") float SuitPower = 1800.f;
 	UPROPERTY(BlueprintAssignable) FOnStatChanged OnSuitPowerChanged;
+
+	// ---- Suit seal (causal condition) ----
+	UPROPERTY(Replicated, VisibleInstanceOnly, BlueprintReadOnly, Category = "Survival|Seal")
+	FPartCondition SuitCondition;
 
 	// ---- Temperature (body) ----
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Survival|Temperature") float MinSafeTempC = 0.f;
@@ -59,14 +61,36 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Survival|Damage") float SuffocationDPS = 8.f;
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Survival|Damage") float TempDamageDPS = 4.f;
 
-	// ---- Public mutation ----
+	// ---- Public mutation (SERVER) ----
 	UFUNCTION(BlueprintCallable) void AddOxygen(float Amount);
 	UFUNCTION(BlueprintCallable) void AddSuitPower(float Amount);
 	UFUNCTION(BlueprintCallable) void SetAmbientTemperature(float TempCelsius) { AmbientTempC = TempCelsius; }
 
-	UFUNCTION(BlueprintPure) float GetOxygenNormalized() const { return MaxOxygen > 0 ? Oxygen / MaxOxygen : 0.f; }
-	UFUNCTION(BlueprintPure) float GetSuitPowerNormalized() const { return MaxSuitPower > 0 ? SuitPower / MaxSuitPower : 0.f; }
+	/** SERVER. Grow the seal leak (landing impact, storm exposure). */
+	void AddLeakRateLps(float DeltaLps);
+
+	/**
+	 * SERVER. Consume one seal_kit and patch: leak becomes 0.005*(1+PatchCount)
+	 * then PatchCount increments. Refused at the cap, with no leak, or without
+	 * a kit in Source.
+	 */
+	bool TryPatchSeal(UInventoryComponent* Source);
+
+	/**
+	 * SERVER. Consume one suit_seal and reset leak and PatchCount to 0.
+	 * Legal only at the patch cap.
+	 */
+	bool TryReplaceSeal(UInventoryComponent* Source);
+
+	UFUNCTION(BlueprintPure) float GetOxygenNormalized() const { return SuitO2CapacityL > 0.f ? Oxygen / SuitO2CapacityL : 0.f; }
+	UFUNCTION(BlueprintPure) float GetSuitPowerNormalized() const { return SuitPowerCapacityKJ > 0.f ? SuitPower / SuitPowerCapacityKJ : 0.f; }
 	UFUNCTION(BlueprintPure) float GetBodyTemperature() const { return BodyTempC; }
+
+	/** Metabolic plus leak, L/s. */
+	float GetOxygenDrainLps() const;
+
+	/** Idle drain in kJ/s (watts / 1000). */
+	float GetSuitPowerDrainKJps() const { return FMath::Max(SuitPowerDrainW, 0.f) / 1000.f; }
 
 protected:
 	UFUNCTION() void OnRep_Oxygen()    { OnOxygenChanged.Broadcast(GetOxygenNormalized()); }

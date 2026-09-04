@@ -1,10 +1,12 @@
 # Exoneer
 
-**Exoneer** is a first-person, stylized, survival space-engineering sandbox built for **Unreal Engine 5.8+**. The player is a stranded engineer on an alien planet who survives by mining, refining, fabricating, building modular bases, and constructing physics-driven vehicles. The visual target is *chunky, colorful, cartoonish sci-fi* with clean silhouettes and rounded edges — never childish, never derivative of any existing IP.
+**Exoneer** is a first-person, stylized, survival space-engineering **sandbox** built for **Unreal Engine 5.8+**. The player is a stranded engineer on a living basin who survives by mining, refining, fabricating, **constructing** modular bases, and **driving** physics-true vehicles that need **causal maintenance**. Projects are optional. The unique endgoal – if you want it – is **Road to Orbit**: the rocket is the last vehicle in a logistics chain you physically built. The visual target is *chunky, colorful, cartoonish sci-fi* with clean silhouettes and rounded edges – never childish, never derivative of any existing IP. The job is the opposite of cartoon: if it would not stand, haul, or wear that way, it does not.
 
-> **Project status.** This repository contains the **C++ foundation (construction layer v2), configuration, and project scaffold**, designed for 1–4 player listen-server co-op: every gameplay system is server-authoritative and replicated. UE5 binary content (Blueprints, maps, UMG widgets, Data Asset instances, meshes, materials) must be authored inside the UE5 Editor — see [Editor Setup](#editor-setup).
+> **Project status.** This repository contains the **C++ foundation (construction layer v2), configuration, and project scaffold**, designed for 1–4 player listen-server co-op: every gameplay system is server-authoritative and replicated. UE5 binary content (Blueprints, maps, UMG widgets, Data Asset instances, meshes, materials) must be authored inside the UE5 Editor – see [Editor Setup](#editor-setup).
 >
-> **The permanent design boundary is [docs/GAME-SCOPE.md](docs/GAME-SCOPE.md)** (master game scope architecture v2.0 — eight modules, hyper-realistic engineering rules, no arcade stat boosts, diegetic UI only). The current implementation layer is specified in [docs/ARCHITECTURE-V2.md](docs/ARCHITECTURE-V2.md); its gap map against the scope is in GAME-SCOPE.md section 9.
+> **Product north star:** [docs/VISION.md](docs/VISION.md) – sandbox autonomy, four verbs, optional Long Watch / Handshake / Road to Orbit. **Roadmap:** [docs/ROADMAP.md](docs/ROADMAP.md).
+>
+> **Module and rules boundary:** [docs/GAME-SCOPE.md](docs/GAME-SCOPE.md) (eight modules, causal maintenance §10, no arcade stat boosts, diegetic UI only). **Current implementation layer:** [docs/ARCHITECTURE-V2.md](docs/ARCHITECTURE-V2.md) (v2 implemented; v3 seams for condition/projects/save). When a feature disagrees with *what the game is*, VISION wins; when it disagrees with *how a system must behave*, GAME-SCOPE wins.
 
 ---
 
@@ -31,8 +33,8 @@ The authoritative reference is [docs/ARCHITECTURE-V2.md](docs/ARCHITECTURE-V2.md
 - **`AMachinePiece`** extends `ABasePiece` with power, an internal inventory, a conveyor link, and a replicated `EMachineState` (Idle / Processing / OutputFull / LowPower) for UI and VFX. Concrete machines: Refinery, Fabricator, OxygenGenerator, Battery, SolarPanel.
 
 ### Vehicle building (unified grid)
-- **`AVehicleConstruct`** is one physics-simulated rigid body plus a fast-array of `FVehicleBlockRecord`s (25 cm cells, 24 orientations — see `VehicleOrientation.h`). Each block contributes a welded collision box with a per-block mass override, so mass and handling emerge from the layout.
-- Functional blocks (thruster, cockpit, battery, solar) spawn server-side `UVehicleModule` objects. A per-tick power ledger produces `PowerSupplyFraction`, which scales thrust — under-powered craft fly sluggishly instead of failing.
+- **`AVehicleConstruct`** is one physics-simulated rigid body plus a fast-array of `FVehicleBlockRecord`s (25 cm cells, 24 orientations – see `VehicleOrientation.h`). Each block contributes a welded collision box with a per-block mass override, so mass and handling emerge from the layout.
+- Functional blocks (thruster, cockpit, battery, solar) spawn server-side `UVehicleModule` objects. A per-tick power ledger produces `PowerSupplyFraction`, which scales thrust – under-powered craft fly sluggishly instead of failing.
 - Removing blocks runs flood-fill split detection: disconnected islands become new constructs.
 - Piloting: interact with a cockpit; your character stays possessed and forwards move/look intents through a server RPC.
 
@@ -78,8 +80,8 @@ Same action set as before: `IMC_PlayerDefault` plus `IA_Move`, `IA_Look`, `IA_Ju
 In **Project Settings → AssetManager → Primary Asset Types**, register: `Item`, `Piece`, `VehicleBlock`, `Recipe`, `Biome` → mapped to the matching `U*DataAsset` classes. Save/load and menu lookups depend on this.
 
 - **Items** (`UItemDefinitionDataAsset`): `stone`, `ice`, `iron_ore`, `silicon_ore`, `carbon`, `scrap`, `iron_ingot`, `silicon_wafer`, `plate`, `motor`, `computer_board`, `oxygen`.
-- **Pieces** (`UPieceDefinitionDataAsset`): per tier (Salvage/Alloy/Composite): foundation, wall, floor, ramp, roof, beam — set `MountTag`, sockets with `AcceptedMounts`, `Stages` (build costs + weld work), support budget/cost, `bGroundable` on foundations/beams. Machines: refinery, fabricator, oxygen generator, battery, solar panel — `MountTag = Exoneer.Mount.Deployable`, `PieceClass` = the matching `A*Piece`, machine stats (`PowerDelta`, `EnergyStorage`, `InventoryCapacity`, `OxygenProductionPerSec`).
-- **Vehicle blocks** (`UVehicleBlockDefinitionDataAsset`): `frame_1x1` (structural), `cockpit`, `thruster_small`, `battery_small`, `solar_small` — set `SizeInCells`, `Mass`, `Stages`, `ModuleClass` (`UCockpitModule`, `UThrusterModule`, `UBatteryModule`, `USolarModule`), `PowerDelta` / `EnergyStorage` / `MaxThrust`.
+- **Pieces** (`UPieceDefinitionDataAsset`): per tier (Salvage/Alloy/Composite): foundation, wall, floor, ramp, roof, beam – set `MountTag`, sockets with `AcceptedMounts`, `Stages` (build costs + weld work), support budget/cost, `bGroundable` on foundations/beams. Machines: refinery, fabricator, oxygen generator, battery, solar panel – `MountTag = Exoneer.Mount.Deployable`, `PieceClass` = the matching `A*Piece`, machine stats (`PowerDelta`, `EnergyStorage`, `InventoryCapacity`, `OxygenProductionPerSec`).
+- **Vehicle blocks** (`UVehicleBlockDefinitionDataAsset`): `frame_1x1` (structural), `cockpit`, `thruster_small`, `battery_small`, `solar_small` – set `SizeInCells`, `Mass`, `Stages`, `ModuleClass` (`UCockpitModule`, `UThrusterModule`, `UBatteryModule`, `USolarModule`), `PowerDelta` / `EnergyStorage` / `MaxThrust`.
 - **Recipes**: as before (`recipe_iron_ingot`, `recipe_silicon_wafer`, `recipe_plate`, `recipe_motor`, `recipe_computer_board`, `recipe_oxygen`).
 - **Biome** (`Biome_StarterTundra`): gravity, temps, wind, resource list, `StormProbabilityPerHour`, `StormDamagePerSecond`.
 
@@ -114,24 +116,28 @@ Place frame blocks in Build mode (vehicle selection), weld them, add a cockpit +
 | Secondary action (deconstruct) | Right Mouse |
 | Open inventory / build menu | Tab / B |
 | Rotate block, cycle socket | R |
-| Cancel placement | Esc |
+| Cancel placement | X |
 | Toggle tool (Mining ↔ Build ↔ Weld) | Q |
 | Enter / exit cockpit | F |
+| Toggle Flight / Ground control | V |
+| Service brake | Z |
+| Handbrake | LeftControl |
 
 ---
 
 ## Milestones & roadmap
 
-### Done — construction layer v2 (this repo)
-- Replicated inventory/interaction, socket-based base building with structural support, unified-grid physics vehicles with split detection, ghost-then-invest construction, machines with state machines, server-validated mining, replicated environment + storms, save/load v2.
+The living plan is [docs/ROADMAP.md](docs/ROADMAP.md). Short version:
 
-### Next — first co-op survival loop
-Editor content pass (assets above), then: walk, mine, refine, fabricate, build a powered base, and weld together a first hover craft — solo and as a 2-player listen-server session.
+### Done – construction layer v2 + design contract
+- Replicated inventory/interaction, socket-based bases, grid vehicles, ghost-then-invest, machines, mining, storms, Bekker-Wong wheels, save/load v2.
+- Sandbox-first vision, causal maintenance rules, v3 architecture seams, sandbox / maintenance / projects / escape specs.
 
-### Then
-- EOS sessions (framework 0): OnlineServicesEOS configuration, lobby + join flow.
-- Survival stats replication redo (suit power/oxygen currently sim locally).
-- Pressurized rooms, tiered progression, hazards depth, world beauty pass — see the production prompts in the project history.
+### Next – risk prototypes (parallel)
+Loaded rover on firm/sand/clay; bridge/shelter under load; tire wear → diagnose → replace → replicate → persist (kills weld-to-heal); grid ascent-craft prototype (go/no-go for Road to Orbit in 1.0).
+
+### 1.0 – unrestricted sandbox
+One authored basin. Optional Long Watch and Handshake. Road to Orbit only if the flight prototype meets the sim bar – never a cutscene.
 
 ---
 
@@ -147,4 +153,4 @@ Editor content pass (assets above), then: walk, mine, refine, fabricate, build a
 
 ## License
 
-MIT — see `LICENSE` if/when added. All names, lore, and visual direction are original to Exoneer.
+MIT – see `LICENSE` if/when added. All names, lore, and visual direction are original to Exoneer.

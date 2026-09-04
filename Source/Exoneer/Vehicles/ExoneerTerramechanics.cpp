@@ -13,9 +13,15 @@ FSoilParams FirmGroundDefault(float CoulombMu)
 	Soil.N1 = 0.f;        // hard ground does not dig in
 	Soil.Cohesion = 0.f;
 	Soil.FrictionAngleRad = FMath::Atan(FMath::Max(CoulombMu, 0.05f));
+	// Placeholder compliance only: on a hard surface the shear displacement
+	// that mobilises full friction belongs to the TREAD, not to a soil bed, so
+	// bCoulombInterface tells the wheel to substitute its own tread moduli
+	// (FVehicleWheelSpec::TreadShearModulusM, a few millimetres). These soil
+	// numbers stay for any reader that does not carry a tire.
 	Soil.ShearK = 0.01f;
 	Soil.ShearKy = 0.012f;
 	Soil.UnitWeight = 18000.f;
+	Soil.bCoulombInterface = true;
 	return Soil;
 }
 

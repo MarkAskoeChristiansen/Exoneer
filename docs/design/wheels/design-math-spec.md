@@ -223,6 +223,78 @@ By construction `sqrt(F_x² + F_y²) = F_r <= F_bud` – the friction budget is 
 
 Drawbar pull (reported to HUD/dashboard, and the number the design consequences in the scope reason about): `DP = F_x - (R_c + R_b)` per wheel, summed over wheels.
 
+#### 5.2a The two interfaces – soil shear vs a Coulomb contact
+
+`F_bud` above is the SOIL's Mohr-Coulomb strength, and `TreadMobilisation` is the
+fraction of it a grouser can develop. On hard ground there is no soil to shear.
+`FirmGroundDefault` sets `tan(phi)` from the hit surface's own physical-material
+friction, so `tan(phi)` already IS the rubber-on-surface coefficient; multiplying
+it again by a soil-mobilisation fraction has no physical referent and double
+counts. It also inverts the family ordering the content intends – it made a
+lugged mud tire out-grip a road tire on tarmac.
+
+A contact therefore carries a flag, `FSoilParams::bCoulombInterface`, set only by
+`FirmGroundDefault`. When it is set the wheel substitutes its own tire constants
+for the soil's:
+
+```
+scale = bCoulombInterface ? HardSurfaceGrip : TreadMobilisation
+K     = bCoulombInterface ? TreadShearModulusM        : Soil.ShearK
+K_y   = bCoulombInterface ? TreadShearModulusLateralM : Soil.ShearKy
+```
+
+The moduli matter as much as the scale. `K` is the sliding displacement needed to
+mobilise full strength; in soil that is centimetres, but on rock it is the TREAD
+deforming, a few millimetres. Carrying the soil value onto tarmac made a tire
+reach only 38 percent of its budget at ten degrees of slip angle, which reads as
+a vehicle that turns its wheels a long way and goes straight on.
+
+#### 5.2b Stick and slide – Coulomb friction below the sliding threshold
+
+`F_bud · E(u)` is a steady SLIDING law: `E(u) -> u/2` as `u -> 0`, so it says a
+patch develops no force until it is already sliding. That is not what a tire
+does. A parked vehicle is held by STATIC friction, and the missing branch was the
+whole of the parked-rover creep: every tangential term passed through zero as an
+odd function of sliding speed, which made the contact a lumped damper of about
+500 kN/(m/s) – past the explicit stability limit `2m/dt` at a 1/120 s substep, so
+it diverged into a substep-frequency buzz that any asymmetry rectified into a
+slow walk.
+
+Let `v_slip = omega·r_eff - v_x` and `v_y` be the patch's sliding velocity, and
+let `m_c = M_body / N_wheels` be the mass share this patch accelerates. The
+tangential impulse acts on the body through `1/m_c` and, longitudinally, on the
+wheel spin through `r_eff²/I_w`:
+
+```
+F_stick_x = (v_slip / dt + T_drive · r_eff / I_w) / (1/m_c + r_eff²/I_w)
+F_stick_y = -v_y · m_c / dt
+```
+
+`F_stick_x` is the force that lands the patch at zero sliding speed at the end of
+the substep. For a wheel rolling without slipping it reduces exactly to the
+textbook `T / (r (1 + I/(m r²)))`, so a launch from rest drives the vehicle
+rather than welding it.
+
+The two branches hand over across a regularisation width `StickSpeedMS` (Coulomb
+friction is set-valued at zero sliding speed, so a width is required):
+
+```
+w      = 1 - clamp((|v_slide| - v_stick) / v_stick, 0, 1)
+F      = lerp(F_slide, F_stick, w),  then clamped to |F| <= F_bud · scale
+```
+
+Both branches are bounded by the SAME Mohr-Coulomb budget, so the stick branch
+can never manufacture grip the soil does not have: on clay the budget is small,
+so a launch breaks straight through it and the wheel spins, which is the lesson
+the soil is there to teach.
+
+The sliding branch additionally obeys a no-overshoot bound, the tangential twin
+of the wheel-spin clamp in 6.4: a dissipative force may bring the sliding to a
+stop within a substep but never drive it backwards, so
+`|F_x| <= |v_slip| / (dt (1/m_c + r_eff²/I_w))` and `|F_y| <= |v_y| m_c / dt`.
+This is an integrator correction – it removes energy the explicit update was
+injecting – and not added damping.
+
 ### 5.3 Motion resistance
 
 Three terms; the first two are external soil forces on the chassis, the third is an internal torque on the wheel spin DOF. Do not double-apply.
